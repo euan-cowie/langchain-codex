@@ -26,6 +26,7 @@ npm run typecheck
 npm test
 npm run build
 npm run pack:dry-run
+npm run smoke:package
 ```
 
 After the initial commit has been pushed to `main`, also run:
@@ -86,13 +87,21 @@ Review `CHANGELOG.md`, `package.json`, and `package-lock.json`, then merge the v
 
 Publish from GitHub Actions using the `Release` workflow. The workflow runs `npm run release`, which delegates to `changeset publish`.
 
+Create a tag and GitHub release from the exact version commit:
+
+```bash
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin vX.Y.Z
+gh release create vX.Y.Z --title "vX.Y.Z" --notes-file /tmp/langchain-codex-vX.Y.Z-notes.md
+```
+
 Post-publish checks:
 
 - [ ] Package page renders README.
 - [ ] Tarball contains only `dist`, `README.md`, `LICENSE`, `CHANGELOG.md`, and `package.json`.
 - [ ] Install works in a fresh temp project.
 - [ ] Basic example works from the published package.
-- [ ] Create a GitHub release for `v0.1.0`.
+- [ ] Create a GitHub release for the published version.
 
 ## Security Notes
 

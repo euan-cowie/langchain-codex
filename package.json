@@ -23,7 +23,7 @@
     "llm"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "exports": {
     ".": {
@@ -52,7 +52,8 @@
     "release": "changeset publish",
     "prepack": "npm run build",
     "prepublishOnly": "npm run lint && npm run typecheck && npm test && npm run build",
-    "pack:dry-run": "npm pack --dry-run"
+    "pack:dry-run": "npm pack --dry-run",
+    "smoke:package": "node scripts/smoke-test-package.mjs"
   },
   "peerDependencies": {
     "@langchain/core": "^1.0.0",
