@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "LangChain.js chat model adapter for OpenAI Codex SDK.",
   "type": "module",
+  "types": "./dist/index.d.ts",
   "sideEffects": false,
   "license": "MIT",
   "author": "Euan Cowie",
@@ -29,7 +30,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
