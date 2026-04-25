@@ -50,7 +50,7 @@ Future work to bring `langchain-codex` closer to ChatOpenAI-style ergonomics whi
 
 ## Release Automation
 
-- [ ] Add an automated version PR workflow using Changesets.
-- [ ] Create git tags automatically after successful npm publish.
-- [ ] Create GitHub releases automatically from the matching changelog section.
+- [x] Add an automated version PR workflow using Changesets.
+- [x] Create git tags automatically after successful npm publish.
+- [x] Create GitHub releases automatically from the matching changelog section.
 - [ ] Add a post-publish smoke test that installs the just-published version of `langchain-codex` from npm in a fresh temp project.

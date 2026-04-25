@@ -1,6 +1,6 @@
 # Release Checklist
 
-Status: pre-release  
+Status: published, pre-1.0  
 Target package: `langchain-codex`  
 Primary export: `ChatCodexSDK`
 
@@ -17,7 +17,7 @@ Primary export: `ChatCodexSDK`
 
 ## Local Verification
 
-Run before tagging or publishing:
+Run before publishing:
 
 ```bash
 npm install
@@ -77,23 +77,20 @@ Fallback if the name is taken:
 
 ## Publish
 
-Version the release from pending changesets:
+Version PRs are created by the `Version Packages` workflow after changesets land on `main`.
+
+If a manual version PR is needed, run:
 
 ```bash
 npm run version
 ```
 
-Review `CHANGELOG.md`, `package.json`, and `package-lock.json`, then merge the version commit.
+Review `CHANGELOG.md`, `package.json`, and `package-lock.json`, then merge the version PR.
 
 Publish from GitHub Actions using the `Release` workflow. The workflow runs `npm run release`, which delegates to `changeset publish`.
 
-Create a tag and GitHub release from the exact version commit:
-
-```bash
-git tag -a vX.Y.Z -m "vX.Y.Z"
-git push origin vX.Y.Z
-gh release create vX.Y.Z --title "vX.Y.Z" --notes-file /tmp/langchain-codex-vX.Y.Z-notes.md
-```
+The release workflow creates the matching `vX.Y.Z` git tag and GitHub release after npm publish
+succeeds.
 
 Post-publish checks:
 
@@ -101,7 +98,7 @@ Post-publish checks:
 - [ ] Tarball contains only `dist`, `README.md`, `LICENSE`, `CHANGELOG.md`, and `package.json`.
 - [ ] Install works in a fresh temp project.
 - [ ] Basic example works from the published package.
-- [ ] Create a GitHub release for the published version.
+- [ ] GitHub release exists for the published version.
 
 ## Security Notes
 

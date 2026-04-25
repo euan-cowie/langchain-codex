@@ -52,6 +52,7 @@
     "changeset:status": "changeset status",
     "version": "changeset version",
     "release": "changeset publish",
+    "release:github": "node scripts/create-github-release.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm run lint && npm run typecheck && npm test && npm run build",
     "pack:dry-run": "npm pack --dry-run",
