@@ -19,7 +19,7 @@ console.log(response.content);
 
 ## Status
 
-This package is under active development and is not published yet.
+This package is published on npm as `langchain-codex`. The API is still pre-1.0 and may change between minor releases.
 
 ## What This Is
 
@@ -53,7 +53,7 @@ threads. Those are different from provider-side LangChain tool calling.
 npm install langchain-codex @langchain/core zod
 ```
 
-Until the package is published, install from this repository during development:
+For local repository development:
 
 ```bash
 npm install
@@ -62,7 +62,7 @@ npm run build
 
 ## Requirements
 
-- Node.js 18 or later.
+- Node.js 20 or later.
 - `@openai/codex-sdk`, installed as a runtime dependency of this package.
 - Codex authentication configured through the Codex CLI, IDE/app, or API-key auth.
 
@@ -291,7 +291,7 @@ The first release targets:
 
 - `@langchain/core` 1.x
 - `@openai/codex-sdk` 0.125.x
-- Node.js 18 or later
+- Node.js 20 or later
 
 The Codex SDK is moving quickly. This package pins a conservative dependency range and wraps the
 SDK behind a small adapter surface.

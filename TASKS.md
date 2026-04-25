@@ -45,7 +45,12 @@ Future work to bring `langchain-codex` closer to ChatOpenAI-style ergonomics whi
 
 ## Package Quality
 
-- [ ] Add changesets or another release-note workflow.
 - [ ] Add API documentation generated from TypeScript declarations.
-- [ ] Add a fresh-project install smoke test to CI.
 - [ ] Add a self-hosted/manual workflow for real Codex integration tests.
+
+## Release Automation
+
+- [ ] Add an automated version PR workflow using Changesets.
+- [ ] Create git tags automatically after successful npm publish.
+- [ ] Create GitHub releases automatically from the matching changelog section.
+- [ ] Add a post-publish smoke test that installs the just-published version of `langchain-codex` from npm in a fresh temp project.
