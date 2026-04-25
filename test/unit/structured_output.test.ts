@@ -1,7 +1,6 @@
 import { AIMessage } from "@langchain/core/messages";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { z as z3 } from "zod/v3";
 import { CodexStructuredOutputError } from "../../src/index.js";
 import { parseMessageJson, toCodexOutputSchema } from "../../src/structured_output.js";
 
@@ -27,14 +26,17 @@ describe("structured output helpers", () => {
     });
   });
 
-  it("converts Zod v3 schemas through zod-to-json-schema", () => {
-    const schema = toCodexOutputSchema(
-      z3.object({
-        summary: z3.string(),
-      }),
-    );
+  it("passes JSON Schema objects through unchanged", () => {
+    const schema = toCodexOutputSchema({
+      type: "object",
+      properties: {
+        summary: { type: "string" },
+      },
+      required: ["summary"],
+      additionalProperties: false,
+    });
 
-    expect(schema).toMatchObject({
+    expect(schema).toEqual({
       type: "object",
       properties: {
         summary: { type: "string" },

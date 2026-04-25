@@ -3,7 +3,6 @@ import type { BaseLanguageModelInput } from "@langchain/core/language_models/bas
 import type { BaseMessage } from "@langchain/core/messages";
 import type { Runnable } from "@langchain/core/runnables";
 import { toJSONSchema } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 import { CodexStructuredOutputError, CodexUnsupportedFeatureError } from "./errors.js";
 import type { ChatCodexSDK, ChatCodexSDKCallOptions } from "./index.js";
 
@@ -82,10 +81,6 @@ export function toCodexOutputSchema(schema: unknown, name?: string): Record<stri
 
   if (isZodV4Schema(schema)) {
     jsonSchema = toJSONSchema(schema, { target: "draft-07" });
-  } else if (isZodLikeSchema(schema)) {
-    jsonSchema = zodToJsonSchema(schema as unknown as Parameters<typeof zodToJsonSchema>[0], {
-      target: "openAi",
-    });
   } else if (isRecord(schema)) {
     jsonSchema = { ...schema };
   } else {
