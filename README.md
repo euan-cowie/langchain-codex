@@ -66,6 +66,17 @@ npm run build
 - `@openai/codex-sdk`, installed as a runtime dependency of this package.
 - Codex authentication configured through the Codex CLI, IDE/app, or API-key auth.
 
+## Module Format
+
+`langchain-codex` is ESM-only and supports Node.js 20 or later. Use `import` syntax from ESM
+projects:
+
+```ts
+import { ChatCodexSDK } from "langchain-codex";
+```
+
+CommonJS output is not published in v0.1.
+
 ## Authentication
 
 This package does not handle OAuth tokens directly. It relies on the local Codex runtime and
