@@ -263,7 +263,13 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
 
           const eventBlocks = contentBlocksFromStreamItemEvent(event, seenReasoningTextByItemId);
           if (eventBlocks.length > 0) {
-            yield createContentBlockChunk(eventBlocks, threadId, this.model);
+            const chunk = createContentBlockChunk(eventBlocks, threadId, this.model);
+
+            await runManager?.handleLLMNewToken("", undefined, undefined, undefined, undefined, {
+              chunk,
+            });
+
+            yield chunk;
           }
 
           continue;

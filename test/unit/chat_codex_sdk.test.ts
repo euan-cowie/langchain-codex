@@ -1,5 +1,6 @@
 import type { ThreadEvent, ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import type { ThreadItem } from "@openai/codex-sdk";
+import { HumanMessage } from "@langchain/core/messages";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { ChatCodexSDK, CodexUnsupportedFeatureError } from "../../src/index.js";
@@ -148,6 +149,43 @@ describe("ChatCodexSDK", () => {
         text: "Tests passed.",
       },
     ]);
+  });
+
+  it("allows returned runtime-rich messages to be used as follow-up history", async () => {
+    const client = new FakeCodexClient();
+    client.startedThread.finalResponse = "Tests passed.";
+    client.startedThread.items = [
+      { id: "reason-1", type: "reasoning", text: "Need to inspect the test output." },
+      {
+        id: "cmd-1",
+        type: "command_execution",
+        command: "npm test",
+        aggregated_output: "4 passed",
+        exit_code: 0,
+        status: "completed",
+      },
+      { id: "msg-1", type: "agent_message", text: "Tests passed." },
+    ];
+    const model = new ChatCodexSDK({ codexClient: asCodexClient(client) });
+
+    const first = await model.invoke("Run the tests.");
+    client.startedThread.finalResponse = "Continuing.";
+    client.startedThread.items = [{ id: "msg-2", type: "agent_message", text: "Continuing." }];
+
+    await model.invoke([new HumanMessage("Previous task."), first, new HumanMessage("Continue.")]);
+
+    expect(client.startedThread.runInputs[1]).toBe(
+      [
+        "Human:",
+        "Previous task.",
+        "",
+        "Assistant:",
+        "Tests passed.",
+        "",
+        "Human:",
+        "Continue.",
+      ].join("\n"),
+    );
   });
 
   it("maps MCP, web search, file change, todo, and error items to standard blocks", async () => {
@@ -439,11 +477,20 @@ describe("ChatCodexSDK", () => {
       { type: "turn.completed", usage },
     ];
     const customEvents: Array<{ name: string; data: unknown }> = [];
+    const callbackContentBlockTypes: string[] = [];
     const model = new ChatCodexSDK({ codexClient: asCodexClient(client) });
 
     const stream = await model.stream("Run tests.", {
       callbacks: [
         {
+          handleLLMNewToken(_token, _idx, _runId, _parentRunId, _tags, fields) {
+            const chunk = fields?.chunk;
+            if (hasMessageContentBlocks(chunk)) {
+              callbackContentBlockTypes.push(
+                ...chunk.message.contentBlocks.map((block) => block.type),
+              );
+            }
+          },
           handleCustomEvent(name, data) {
             customEvents.push({ name, data });
           },
@@ -488,6 +535,9 @@ describe("ChatCodexSDK", () => {
       "codex.agent_message.updated",
       "codex.turn.completed",
     ]);
+    expect(callbackContentBlockTypes).toContain("reasoning");
+    expect(callbackContentBlockTypes).toContain("server_tool_call");
+    expect(callbackContentBlockTypes).toContain("server_tool_call_result");
 
     const streamEvents = model.streamEvents("Run tests.", { version: "v2" });
     const customStreamEventNames: string[] = [];
@@ -548,4 +598,19 @@ async function* toAsyncGenerator(events: ThreadEvent[]): AsyncGenerator<ThreadEv
 
 function asCodexClient(client: FakeCodexClient): CodexClientLike {
   return client;
+}
+
+function hasMessageContentBlocks(
+  value: unknown,
+): value is { message: { contentBlocks: Array<{ type: string }> } } {
+  return (
+    isRecord(value) &&
+    isRecord(value.message) &&
+    Array.isArray(value.message.contentBlocks) &&
+    value.message.contentBlocks.every((block) => isRecord(block) && typeof block.type === "string")
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

@@ -56,4 +56,48 @@ describe("convertMessagesToCodexInput", () => {
       ]),
     ).toThrow(CodexUnsupportedFeatureError);
   });
+
+  it("ignores assistant runtime output blocks when converting follow-up history", () => {
+    const input = convertMessagesToCodexInput([
+      new HumanMessage("Run the tests."),
+      new AIMessage({
+        contentBlocks: [
+          { id: "reason-1", type: "reasoning", reasoning: "Need to inspect output." },
+          {
+            id: "cmd-1",
+            type: "server_tool_call",
+            name: "codex_shell",
+            args: { command: "npm test" },
+          },
+          {
+            type: "server_tool_call_result",
+            name: "codex_shell",
+            toolCallId: "cmd-1",
+            status: "success",
+            output: { command: "npm test", output: "4 passed", exitCode: 0 },
+          },
+          {
+            id: "todo-1",
+            type: "non_standard",
+            value: { type: "todo_list", items: [{ text: "Run tests", completed: true }] },
+          },
+          { type: "text", text: "Tests passed." },
+        ],
+      }),
+      new HumanMessage("Continue."),
+    ]);
+
+    expect(input).toBe(
+      [
+        "Human:",
+        "Run the tests.",
+        "",
+        "Assistant:",
+        "Tests passed.",
+        "",
+        "Human:",
+        "Continue.",
+      ].join("\n"),
+    );
+  });
 });

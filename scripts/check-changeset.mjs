@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
 
 const baseRef = process.env.CHANGESET_BASE_REF ?? githubBaseRef() ?? "origin/main";
 const changedFiles = getChangedFiles(baseRef);
@@ -64,12 +63,7 @@ function git(args) {
 }
 
 function isChangesetFile(file) {
-  return (
-    file.startsWith(".changeset/") &&
-    file.endsWith(".md") &&
-    file !== ".changeset/README.md" &&
-    existsSync(file)
-  );
+  return file.startsWith(".changeset/") && file.endsWith(".md") && file !== ".changeset/README.md";
 }
 
 function isPackageImpactingFile(file) {
