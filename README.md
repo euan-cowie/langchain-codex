@@ -47,7 +47,7 @@ where Codex's local runtime is the model provider.
 - It does not handle OAuth tokens directly.
 - It does not call private Codex backend APIs.
 - It does not support browser use.
-- It does not implement LangChain `bindTools()` in v0.1.
+- Its `bindTools()` support is experimental and prompt-mediated, not SDK-native provider tool calling.
 
 Codex has its own local tools, shell access, patching, sandboxing, approvals, and persisted
 threads. Those are different from provider-side LangChain tool calling.
@@ -175,6 +175,53 @@ console.log(result.raw.response_metadata);
 console.log(result.parsed);
 ```
 
+## Experimental Tool Calling
+
+`bindTools()` is available as an experimental LangChain compatibility layer. The Codex SDK does not
+currently expose a native JavaScript tool registration API, so this adapter uses Codex
+`outputSchema` plus tool instructions to return LangChain `AIMessage.tool_calls`.
+
+```ts
+import { tool } from "@langchain/core/tools";
+import { z } from "zod";
+
+const multiply = tool(async ({ a, b }) => a * b, {
+  name: "multiply",
+  description: "Multiply two numbers.",
+  schema: z.object({
+    a: z.number(),
+    b: z.number(),
+  }),
+});
+
+const modelWithTools = model.bindTools([multiply]);
+const response = await modelWithTools.invoke("What is 6 * 7?");
+
+console.log(response.tool_calls);
+```
+
+LangChain or LangGraph can execute those tool calls and feed back `ToolMessage` results on the next
+turn:
+
+```ts
+import { HumanMessage, ToolMessage } from "@langchain/core/messages";
+
+const toolCall = response.tool_calls?.[0];
+const final = await modelWithTools.invoke([
+  new HumanMessage("What is 6 * 7?"),
+  response,
+  new ToolMessage({
+    content: "42",
+    tool_call_id: toolCall?.id ?? "missing-tool-call-id",
+    name: "multiply",
+  }),
+]);
+```
+
+Supported `tool_choice` values are `"auto"`, `"any"`, `"none"`, a tool name string, and common
+OpenAI-style function tool-choice objects. Streaming tool-call chunks are not native yet; streaming
+with bound tools yields the completed tool-call message as a final chunk.
+
 ## Thread Resume
 
 By default, each call starts a new Codex thread. This keeps `.batch()` behavior predictable and close
@@ -249,15 +296,11 @@ type ChatCodexSDKFields = {
 
 ## Unsupported Features
 
-`bindTools()` intentionally throws in v0.1.
-
-```ts
-model.bindTools([]);
-// CodexUnsupportedFeatureError
-```
-
 Stop sequences are also rejected in v0.1 because Codex runs through the local agent runtime rather
 than a plain text-completion endpoint.
+
+Raw provider `tools` call options are rejected. Pass tools through `model.bindTools(tools)` so the
+experimental adapter can build the Codex prompt and output schema.
 
 ## Troubleshooting
 

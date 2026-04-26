@@ -22,8 +22,42 @@ describe("convertMessagesToCodexInput", () => {
         "Assistant:",
         "I will inspect it.",
         "",
-        "Tool:",
+        "Tool result for call-1:",
         "test output",
+      ].join("\n"),
+    );
+  });
+
+  it("serializes assistant tool calls and matching tool results", () => {
+    const input = convertMessagesToCodexInput([
+      new HumanMessage("What is 6 * 7?"),
+      new AIMessage({
+        content: "",
+        tool_calls: [
+          {
+            type: "tool_call",
+            id: "call-1",
+            name: "multiply",
+            args: { a: 6, b: 7 },
+          },
+        ],
+      }),
+      new ToolMessage({ content: "42", tool_call_id: "call-1", name: "multiply" }),
+    ]);
+
+    expect(input).toBe(
+      [
+        "Human:",
+        "What is 6 * 7?",
+        "",
+        "Assistant:",
+        "Tool calls:",
+        "- id: call-1",
+        "  name: multiply",
+        '  args: {"a":6,"b":7}',
+        "",
+        "Tool result (multiply) for call-1:",
+        "42",
       ].join("\n"),
     );
   });

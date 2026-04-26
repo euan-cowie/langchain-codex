@@ -1,9 +1,14 @@
 import type { ThreadEvent, ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import type { ThreadItem } from "@openai/codex-sdk";
-import { HumanMessage } from "@langchain/core/messages";
+import { HumanMessage, ToolMessage } from "@langchain/core/messages";
+import { tool } from "@langchain/core/tools";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { ChatCodexSDK, CodexUnsupportedFeatureError } from "../../src/index.js";
+import {
+  ChatCodexSDK,
+  CodexStructuredOutputError,
+  CodexUnsupportedFeatureError,
+} from "../../src/index.js";
 import type { CodexClientLike, CodexInput } from "../../src/types.js";
 
 const usage = {
@@ -582,11 +587,152 @@ describe("ChatCodexSDK", () => {
     });
   });
 
-  it("rejects LangChain tool calling", () => {
+  it("returns LangChain tool calls from experimental bindTools", async () => {
+    const client = new FakeCodexClient();
+    client.startedThread.finalResponse = JSON.stringify({
+      type: "tool_calls",
+      content: "",
+      tool_calls: [{ name: "multiply", args: JSON.stringify({ a: 6, b: 7 }) }],
+    });
+    const modelWithTools = new ChatCodexSDK({ codexClient: asCodexClient(client) }).bindTools([
+      multiplyTool,
+    ]);
+
+    const response = await modelWithTools.invoke("What is 6 * 7?");
+
+    expect(response.content).toBe("");
+    expect(response.tool_calls).toEqual([
+      {
+        type: "tool_call",
+        id: "call_1_multiply",
+        name: "multiply",
+        args: { a: 6, b: 7 },
+      },
+    ]);
+    expect(client.startedThread.runOptions[0]?.outputSchema).toMatchObject({
+      type: "object",
+      properties: {
+        tool_calls: {
+          type: "array",
+          items: {
+            properties: {
+              name: { enum: ["multiply"] },
+              args: {
+                type: "string",
+              },
+            },
+          },
+        },
+      },
+    });
+    expect(client.startedThread.runInputs[0]).toEqual(expect.stringContaining("multiply"));
+    expect(client.startedThread.runInputs[0]).toEqual(
+      expect.stringContaining("Experimental LangChain tool-calling mode"),
+    );
+  });
+
+  it("supports forced tool_choice in experimental bindTools", async () => {
+    const client = new FakeCodexClient();
+    client.startedThread.finalResponse = JSON.stringify({
+      type: "tool_calls",
+      content: "",
+      tool_calls: [{ name: "multiply", args: JSON.stringify({ a: 3, b: 5 }) }],
+    });
+    const modelWithTools = new ChatCodexSDK({ codexClient: asCodexClient(client) }).bindTools(
+      [multiplyTool],
+      { tool_choice: "multiply" },
+    );
+
+    const response = await modelWithTools.invoke("Use the tool.");
+
+    expect(response.tool_calls?.[0]).toMatchObject({
+      name: "multiply",
+      args: { a: 3, b: 5 },
+    });
+    expect(client.startedThread.runInputs[0]).toEqual(
+      expect.stringContaining("Tool choice: you must call the multiply tool."),
+    );
+  });
+
+  it("returns final answers from experimental bindTools when no tool is needed", async () => {
+    const client = new FakeCodexClient();
+    client.startedThread.finalResponse = JSON.stringify({
+      type: "final",
+      content: "No tool is needed.",
+      tool_calls: [],
+    });
+    const modelWithTools = new ChatCodexSDK({ codexClient: asCodexClient(client) }).bindTools([
+      multiplyTool,
+    ]);
+
+    const response = await modelWithTools.invoke("Say hello.");
+
+    expect(response.text).toBe("No tool is needed.");
+    expect(response.tool_calls ?? []).toHaveLength(0);
+  });
+
+  it("serializes tool-call history for the follow-up turn", async () => {
+    const client = new FakeCodexClient();
+    client.startedThread.finalResponse = JSON.stringify({
+      type: "tool_calls",
+      content: "",
+      tool_calls: [{ id: "call-1", name: "multiply", args: JSON.stringify({ a: 6, b: 7 }) }],
+    });
+    const modelWithTools = new ChatCodexSDK({ codexClient: asCodexClient(client) }).bindTools([
+      multiplyTool,
+    ]);
+
+    const first = await modelWithTools.invoke("What is 6 * 7?");
+    client.startedThread.finalResponse = JSON.stringify({
+      type: "final",
+      content: "6 * 7 is 42.",
+      tool_calls: [],
+    });
+
+    await modelWithTools.invoke([
+      new HumanMessage("What is 6 * 7?"),
+      first,
+      new ToolMessage({ content: "42", tool_call_id: "call-1", name: "multiply" }),
+    ]);
+
+    expect(client.startedThread.runInputs[1]).toEqual(expect.stringContaining("Tool calls:"));
+    expect(client.startedThread.runInputs[1]).toEqual(expect.stringContaining("name: multiply"));
+    expect(client.startedThread.runInputs[1]).toEqual(
+      expect.stringContaining("Tool result (multiply) for call-1:"),
+    );
+    expect(client.startedThread.runInputs[1]).toEqual(expect.stringContaining("42"));
+  });
+
+  it("rejects invalid experimental tool-call responses", async () => {
+    const client = new FakeCodexClient();
+    client.startedThread.finalResponse = JSON.stringify({
+      type: "tool_calls",
+      content: "",
+      tool_calls: [{ name: "unknown", args: {} }],
+    });
+    const modelWithTools = new ChatCodexSDK({ codexClient: asCodexClient(client) }).bindTools([
+      multiplyTool,
+    ]);
+
+    await expect(modelWithTools.invoke("Call a tool.")).rejects.toThrow(CodexStructuredOutputError);
+  });
+
+  it("rejects raw provider tool options outside bindTools", async () => {
     const model = new ChatCodexSDK({ codexClient: asCodexClient(new FakeCodexClient()) });
 
-    expect(() => model.bindTools([])).toThrow(CodexUnsupportedFeatureError);
+    await expect(model.invoke("Use a tool.", { tools: [] } as never)).rejects.toThrow(
+      CodexUnsupportedFeatureError,
+    );
   });
+});
+
+const multiplyTool = tool(({ a, b }: { a: number; b: number }) => a * b, {
+  name: "multiply",
+  description: "Multiply two numbers.",
+  schema: z.object({
+    a: z.number(),
+    b: z.number(),
+  }),
 });
 
 async function* toAsyncGenerator(events: ThreadEvent[]): AsyncGenerator<ThreadEvent> {
