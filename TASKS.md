@@ -2,6 +2,8 @@
 
 Future work to bring `langchain-codex` closer to ChatOpenAI-style ergonomics while preserving Codex's local-agent semantics.
 
+See `PARITY_ROADMAP.md` for the staged implementation plan, acceptance criteria, and source links.
+
 ## ChatOpenAI Parity
 
 - [ ] Investigate LangChain `bindTools()` support.

@@ -32,22 +32,30 @@ export function convertMessagesToCodexInput(messages: BaseMessage[]): CodexInput
 
 function appendMessage(builder: MutableCodexInputBuilder, message: BaseMessage): void {
   appendText(builder, `${roleLabel(message)}:\n`);
-  appendContent(builder, message.content);
+  appendContent(builder, message.content, message.type === "ai");
   appendText(builder, "\n\n");
 }
 
-function appendContent(builder: MutableCodexInputBuilder, content: MessageContent): void {
+function appendContent(
+  builder: MutableCodexInputBuilder,
+  content: MessageContent,
+  ignoreOutputRuntimeBlocks: boolean,
+): void {
   if (typeof content === "string") {
     appendText(builder, content);
     return;
   }
 
   for (const block of content) {
-    appendContentBlock(builder, block);
+    appendContentBlock(builder, block, ignoreOutputRuntimeBlocks);
   }
 }
 
-function appendContentBlock(builder: MutableCodexInputBuilder, block: unknown): void {
+function appendContentBlock(
+  builder: MutableCodexInputBuilder,
+  block: unknown,
+  ignoreOutputRuntimeBlocks: boolean,
+): void {
   if (typeof block === "string") {
     appendText(builder, block);
     return;
@@ -69,6 +77,10 @@ function appendContentBlock(builder: MutableCodexInputBuilder, block: unknown): 
     return;
   }
 
+  if (ignoreOutputRuntimeBlocks && isOutputRuntimeBlock(block)) {
+    return;
+  }
+
   const imagePath = getLocalImagePath(block);
   if (imagePath !== undefined) {
     appendImage(builder, imagePath);
@@ -83,6 +95,16 @@ function appendContentBlock(builder: MutableCodexInputBuilder, block: unknown): 
 
   throw new CodexUnsupportedFeatureError(
     `Unsupported LangChain message content block type: ${stringifyBlockType(block.type)}`,
+  );
+}
+
+function isOutputRuntimeBlock(block: Record<string, unknown>): boolean {
+  return (
+    block.type === "reasoning" ||
+    block.type === "server_tool_call" ||
+    block.type === "server_tool_call_chunk" ||
+    block.type === "server_tool_call_result" ||
+    block.type === "non_standard"
   );
 }
 

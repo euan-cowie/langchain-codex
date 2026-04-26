@@ -1,7 +1,7 @@
 import { Codex } from "@openai/codex-sdk";
 import type { ThreadEvent, ThreadItem, ThreadOptions, TurnOptions, Usage } from "@openai/codex-sdk";
 import { AIMessage, AIMessageChunk } from "@langchain/core/messages";
-import type { BaseMessage } from "@langchain/core/messages";
+import type { AIMessageFields, BaseMessage } from "@langchain/core/messages";
 import { BaseChatModel, type BindToolsInput } from "@langchain/core/language_models/chat_models";
 import type {
   BaseLanguageModelInput,
@@ -14,6 +14,13 @@ import { CodexUnsupportedFeatureError, normalizeCodexError } from "./errors.js";
 import { convertMessagesToCodexInput } from "./messages.js";
 import { createStructuredOutputRunnable } from "./structured_output.js";
 import { toCodexResponseMetadata, toTokenUsage, toUsageMetadata } from "./metadata.js";
+import {
+  contentBlocksFromThreadItem,
+  reasoningDeltaBlock,
+  shouldUseContentBlocks,
+  threadItemsToContentBlocks,
+  type CodexContentBlock,
+} from "./content_blocks.js";
 import type {
   ChatCodexSDKCallOptions,
   ChatCodexSDKFields,
@@ -135,6 +142,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
   override async _generate(
     messages: BaseMessage[],
     options: this["ParsedCallOptions"],
+    runManager?: CallbackManagerForLLMRun,
   ): Promise<ChatResult> {
     validateCallOptions(options);
 
@@ -155,12 +163,18 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
         items: options.includeCodexItems === false ? undefined : turn.items,
       });
       const usageMetadata = toUsageMetadata(turn.usage);
-      const message = new AIMessage(turn.finalResponse);
-      message.response_metadata = responseMetadata;
+      const contentBlocks = threadItemsToContentBlocks(turn.items, turn.finalResponse);
+      const message = createCodexMessage({
+        text: turn.finalResponse,
+        contentBlocks,
+        responseMetadata,
+        forceV1: shouldForceV1Content(options, this.outputVersion),
+      });
       if (usageMetadata !== undefined) {
         (message as unknown as { usage_metadata?: typeof usageMetadata }).usage_metadata =
           usageMetadata;
       }
+      await emitCompletedTurnEvents(runManager, threadId, turn.items, turn.usage);
       const llmOutput = {
         tokenUsage: toTokenUsage(turn.usage),
         ...responseMetadata,
@@ -197,6 +211,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
       options.timeoutMs ?? this.defaultTimeoutMs,
     );
     const seenAgentTextByItemId = new Map<string, string>();
+    const seenReasoningTextByItemId = new Map<string, string>();
     const items: ThreadItem[] = [];
     let threadId = thread.id ?? options.threadId ?? this.defaultThreadId ?? null;
     let usage: Usage | null = null;
@@ -209,6 +224,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
 
       for await (const event of streamed.events) {
         signalContext.signal?.throwIfAborted();
+        await emitCodexStreamEvent(runManager, event, threadId);
 
         if (event.type === "thread.started") {
           threadId = event.thread_id;
@@ -228,17 +244,32 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
           const delta = getAgentMessageDelta(event.item, seenAgentTextByItemId);
 
           if (delta.length > 0) {
-            await runManager?.handleLLMNewToken(delta);
             const message = new AIMessageChunk(delta);
             message.response_metadata = toCodexResponseMetadata({
               threadId,
               model: this.model,
             });
-
-            yield new ChatGenerationChunk({
+            const chunk = new ChatGenerationChunk({
               text: delta,
               message,
             });
+
+            await runManager?.handleLLMNewToken(delta, undefined, undefined, undefined, undefined, {
+              chunk,
+            });
+
+            yield chunk;
+          }
+
+          const eventBlocks = contentBlocksFromStreamItemEvent(event, seenReasoningTextByItemId);
+          if (eventBlocks.length > 0) {
+            const chunk = createContentBlockChunk(eventBlocks, threadId, this.model);
+
+            await runManager?.handleLLMNewToken("", undefined, undefined, undefined, undefined, {
+              chunk,
+            });
+
+            yield chunk;
           }
 
           continue;
@@ -254,7 +285,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
             items: options.includeCodexItems === false ? undefined : items,
           });
 
-          const message = new AIMessageChunk("");
+          const message = new AIMessageChunk([]);
           message.response_metadata = responseMetadata;
           if (usageMetadata !== undefined) {
             (message as unknown as { usage_metadata?: typeof usageMetadata }).usage_metadata =
@@ -320,6 +351,170 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
 
     return this.codexClient.startThread(this.threadOptions);
   }
+}
+
+function createCodexMessage({
+  text,
+  contentBlocks,
+  responseMetadata,
+  forceV1,
+}: {
+  text: string;
+  contentBlocks: CodexContentBlock[];
+  responseMetadata: Record<string, unknown>;
+  forceV1: boolean;
+}): AIMessage {
+  if (shouldUseContentBlocks(contentBlocks, text, forceV1)) {
+    const fields: AIMessageFields = {
+      contentBlocks,
+      response_metadata: responseMetadata,
+    };
+
+    return new AIMessage(fields);
+  }
+
+  const message = new AIMessage(text);
+  message.response_metadata = responseMetadata;
+  return message;
+}
+
+function createContentBlockChunk(
+  contentBlocks: CodexContentBlock[],
+  threadId: string | null,
+  model: string | undefined,
+): ChatGenerationChunk {
+  const responseMetadata = {
+    ...toCodexResponseMetadata({
+      threadId,
+      model,
+    }),
+    output_version: "v1",
+  };
+  const message = new AIMessageChunk({
+    contentBlocks,
+    response_metadata: responseMetadata,
+  });
+
+  return new ChatGenerationChunk({
+    text: "",
+    message,
+  });
+}
+
+function shouldForceV1Content(
+  options: ChatCodexSDKCallOptions,
+  defaultOutputVersion: string | undefined,
+): boolean {
+  return (
+    (options as { outputVersion?: string }).outputVersion === "v1" || defaultOutputVersion === "v1"
+  );
+}
+
+function contentBlocksFromStreamItemEvent(
+  event: Extract<ThreadEvent, { type: "item.started" | "item.updated" | "item.completed" }>,
+  seenReasoningTextByItemId: Map<string, string>,
+): CodexContentBlock[] {
+  if (event.item.type === "agent_message") {
+    return [];
+  }
+
+  if (event.item.type === "reasoning") {
+    return reasoningDeltaBlock(event.item, seenReasoningTextByItemId);
+  }
+
+  const phase = event.type.slice("item.".length) as "started" | "updated" | "completed";
+  return contentBlocksFromThreadItem(event.item, phase);
+}
+
+async function emitCodexStreamEvent(
+  runManager: CallbackManagerForLLMRun | undefined,
+  event: ThreadEvent,
+  threadId: string | null,
+): Promise<void> {
+  const customEvent = codexCustomEventFromThreadEvent(event, threadId);
+  if (customEvent === undefined) {
+    return;
+  }
+
+  await runManager?.handleCustomEvent(customEvent.name, customEvent.data);
+}
+
+async function emitCompletedTurnEvents(
+  runManager: CallbackManagerForLLMRun | undefined,
+  threadId: string | null,
+  items: ThreadItem[],
+  usage: Usage | null,
+): Promise<void> {
+  if (runManager === undefined) {
+    return;
+  }
+
+  for (const item of items) {
+    await runManager.handleCustomEvent(
+      `codex.${item.type}.completed`,
+      withThreadId({ item }, threadId),
+    );
+  }
+
+  await runManager.handleCustomEvent("codex.turn.completed", withThreadId({ usage }, threadId));
+}
+
+function codexCustomEventFromThreadEvent(
+  event: ThreadEvent,
+  currentThreadId: string | null,
+): { name: string; data: Record<string, unknown> } | undefined {
+  switch (event.type) {
+    case "thread.started":
+      return {
+        name: "codex.thread.started",
+        data: { threadId: event.thread_id },
+      };
+    case "turn.started":
+      return {
+        name: "codex.turn.started",
+        data: withThreadId({}, currentThreadId),
+      };
+    case "turn.completed":
+      return {
+        name: "codex.turn.completed",
+        data: withThreadId({ usage: event.usage }, currentThreadId),
+      };
+    case "turn.failed":
+      return {
+        name: "codex.turn.failed",
+        data: withThreadId({ error: event.error }, currentThreadId),
+      };
+    case "item.started":
+    case "item.updated":
+    case "item.completed": {
+      const phase = event.type.slice("item.".length);
+      return {
+        name: `codex.${event.item.type}.${phase}`,
+        data: withThreadId({ item: event.item }, currentThreadId),
+      };
+    }
+    case "error":
+      return {
+        name: "codex.error",
+        data: withThreadId({ message: event.message }, currentThreadId),
+      };
+    default:
+      return undefined;
+  }
+}
+
+function withThreadId(
+  data: Record<string, unknown>,
+  threadId: string | null,
+): Record<string, unknown> {
+  if (threadId === null) {
+    return data;
+  }
+
+  return {
+    ...data,
+    threadId,
+  };
 }
 
 function buildClientOptions(fields: ChatCodexSDKFields): ConstructorParameters<typeof Codex>[0] {
