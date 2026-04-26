@@ -89,8 +89,8 @@ Review `CHANGELOG.md`, `package.json`, and `package-lock.json`, then merge the v
 
 Publish from GitHub Actions using the `Release` workflow. The workflow runs `npm run release`, which delegates to `changeset publish`.
 
-The release workflow creates the matching `vX.Y.Z` git tag and GitHub release after npm publish
-succeeds.
+The release workflow verifies that the exact package version is visible on npm, then creates the
+matching `vX.Y.Z` git tag and GitHub release.
 
 Post-publish checks:
 

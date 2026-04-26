@@ -4,9 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
+const packageName = packageJson.name;
 const version = packageJson.version;
 const tag = `v${version}`;
 const target = process.env.GITHUB_SHA ?? "HEAD";
+const npmRegistry = process.env.NPM_CONFIG_REGISTRY ?? "https://registry.npmjs.org";
+
+if (typeof packageName !== "string" || packageName.length === 0) {
+  throw new Error("Could not read package name from package.json.");
+}
 
 if (typeof version !== "string" || version.length === 0) {
   throw new Error("Could not read package version from package.json.");
@@ -17,6 +23,8 @@ const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
 if (token === undefined || token.length === 0) {
   throw new Error("GH_TOKEN or GITHUB_TOKEN is required to create a GitHub release.");
 }
+
+verifyPublishedPackage(packageName, version);
 
 try {
   execFileSync("gh", ["release", "view", tag], {
@@ -58,6 +66,75 @@ function extractChangelogSection(changelogText, releaseVersion) {
   const section = sectionLines.join("\n").trim();
 
   return section.length > 0 ? section : undefined;
+}
+
+function verifyPublishedPackage(name, expectedVersion) {
+  const timeoutMs = readPositiveIntegerEnv("NPM_RELEASE_VERIFY_TIMEOUT_MS", 120000);
+  const intervalMs = readPositiveIntegerEnv("NPM_RELEASE_VERIFY_INTERVAL_MS", 5000);
+  const startedAt = Date.now();
+  let lastError = `Package ${name}@${expectedVersion} was not found.`;
+
+  while (Date.now() - startedAt <= timeoutMs) {
+    try {
+      const publishedVersion = execFileSync(
+        "npm",
+        ["view", `${name}@${expectedVersion}`, "version", "--registry", npmRegistry],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      ).trim();
+
+      if (publishedVersion === expectedVersion) {
+        console.log(`Verified ${name}@${expectedVersion} is published to npm.`);
+        return;
+      }
+
+      lastError = `npm returned version ${publishedVersion || "<empty>"}.`;
+    } catch (error) {
+      lastError = describeCommandError(error);
+    }
+
+    sleep(intervalMs);
+  }
+
+  throw new Error(
+    `Refusing to create ${tag}: ${name}@${expectedVersion} was not visible on npm ` +
+      `after ${timeoutMs}ms. Last npm check: ${lastError}`,
+  );
+}
+
+function readPositiveIntegerEnv(name, fallback) {
+  const value = process.env[name];
+
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer when set.`);
+  }
+
+  return parsed;
+}
+
+function describeCommandError(error) {
+  if (error && typeof error === "object" && "stderr" in error) {
+    const stderr = error.stderr;
+    const message = Buffer.isBuffer(stderr) ? stderr.toString("utf8").trim() : String(stderr);
+
+    if (message.length > 0) {
+      return message;
+    }
+  }
+
+  return error instanceof Error ? error.message : String(error);
+}
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function isVersionHeading(line, releaseVersion) {

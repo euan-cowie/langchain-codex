@@ -149,6 +149,9 @@ npm run release:github
 `npm run release` delegates to `changeset publish`.
 `npm run release:github` creates `vX.Y.Z` from the workflow commit and uses the matching changelog
 section as the GitHub release notes.
+Before it creates the tag/release, `npm run release:github` verifies that
+`langchain-codex@X.Y.Z` is visible on the npm registry. If the exact published version is not
+available, the workflow fails without creating the GitHub release or tag.
 The publish step sets `NPM_CONFIG_PROVENANCE=true` so npm can attach provenance metadata from the
 trusted GitHub Actions run.
 
