@@ -1,5 +1,10 @@
 # langchain-codex
 
+[![npm version](https://img.shields.io/npm/v/langchain-codex.svg)](https://www.npmjs.com/package/langchain-codex)
+[![npm downloads](https://img.shields.io/npm/dm/langchain-codex.svg)](https://www.npmjs.com/package/langchain-codex)
+[![CI](https://github.com/euan-cowie/langchain-codex/actions/workflows/ci.yml/badge.svg)](https://github.com/euan-cowie/langchain-codex/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/euan-cowie/langchain-codex/blob/main/LICENSE)
+
 LangChain.js chat model adapter for OpenAI Codex SDK.
 
 `langchain-codex` lets LangChain and LangGraph code use local Codex through the official

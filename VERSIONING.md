@@ -88,7 +88,24 @@ Avoid long-lived release branches unless the project grows enough to need backpo
 
 ## Preparing a Release
 
-When `main` has merged changesets ready to publish, run the normal checks:
+When a PR with changesets is merged to `main`, the `Version Packages` workflow opens or updates a
+Changesets version PR. That PR consumes pending changesets and updates:
+
+- `package.json`
+- `package-lock.json`
+- `CHANGELOG.md`
+
+Review the generated changelog and version bump before merging the version PR.
+
+If the workflow needs to be run manually, use:
+
+```bash
+npm run version
+```
+
+Then commit the generated version changes to a PR.
+
+Before publishing, confirm `main` is green:
 
 ```bash
 npm run lint
@@ -99,32 +116,10 @@ npm run pack:dry-run
 npm run smoke:package
 ```
 
-After the repository has an initial `main` history, check pending release intent:
+You can also inspect pending release intent locally:
 
 ```bash
 npm run changeset:status
-```
-
-Then consume pending changesets:
-
-```bash
-npm run version
-```
-
-This updates:
-
-- `package.json`
-- `package-lock.json`
-- `CHANGELOG.md`
-
-Review the generated changelog and version bump before merging.
-
-Commit the version changes:
-
-```bash
-git add package.json package-lock.json CHANGELOG.md .changeset
-git commit -m "Version 0.1.1"
-git push
 ```
 
 ## Publishing
@@ -137,8 +132,7 @@ Manual release workflow:
 2. Confirm CI is green on `main`.
 3. Run the `Release` workflow from GitHub Actions.
 4. Confirm the package appears on npm with the expected version.
-5. Create and push the git tag for the exact version commit.
-6. Create a GitHub release from that tag.
+5. Confirm the matching GitHub tag and release were created.
 
 The release workflow runs:
 
@@ -149,9 +143,17 @@ npm run typecheck
 npm test
 npm run build
 npm run release
+npm run release:github
 ```
 
 `npm run release` delegates to `changeset publish`.
+`npm run release:github` creates `vX.Y.Z` from the workflow commit and uses the matching changelog
+section as the GitHub release notes.
+Before it creates the tag/release, `npm run release:github` verifies that
+`langchain-codex@X.Y.Z` is visible on the npm registry. If the exact published version is not
+available, the workflow fails without creating the GitHub release or tag.
+The publish step sets `NPM_CONFIG_PROVENANCE=true` so npm can attach provenance metadata from the
+trusted GitHub Actions run.
 
 Fallback manual publish:
 
@@ -165,25 +167,35 @@ Only use the fallback when the GitHub release workflow or npm trusted publishing
 
 The GitHub tag must point to the exact commit whose `package.json` version was published to npm.
 
-Example for `0.1.1`:
+The `Release` workflow creates the tag and GitHub release automatically after a successful npm
+publish. The helper can be run locally if the workflow published npm successfully but release
+creation failed:
 
 ```bash
 git checkout main
 git pull
-git rev-parse HEAD
-cat package.json | jq -r .version
-
-git tag -a v0.1.1 -m "v0.1.1"
-git push origin v0.1.1
-
-gh release create v0.1.1 \
-  --title "v0.1.1" \
-  --notes-file /tmp/langchain-codex-v0.1.1-notes.md
+GH_TOKEN=... npm run release:github
 ```
 
-The release notes file should contain only the changelog section for that version, not the whole changelog.
+The release notes should contain only the changelog section for that version, not the whole
+changelog.
 
 Do not move published tags unless a release was created against the wrong commit and no users could have reasonably consumed it yet.
+
+## Dependabot
+
+Dependabot checks npm dependencies and GitHub Actions weekly. Dependency update PRs must pass the
+same CI checks as normal contributor PRs before merging.
+
+## Branch Protection
+
+Protect `main` in GitHub repository settings. Require pull requests and these required status
+checks before merge:
+
+- `test (20)`
+- `test (22)`
+
+Keep the required check names in sync with `.github/workflows/ci.yml`.
 
 ## npm Trusted Publishing Setup
 
@@ -210,15 +222,14 @@ Current state:
 
 - Changesets manages version bumps and changelog updates.
 - CI verifies lint, typecheck, tests, build, and package dry-run.
-- The `Release` workflow can publish through `changeset publish`.
-- GitHub tags and releases are created manually.
+- Dependabot opens npm and GitHub Actions update PRs.
+- The `Version Packages` workflow opens Changesets version PRs.
+- The `Release` workflow publishes through `changeset publish`.
+- The `Release` workflow creates the git tag and GitHub release after successful npm publish.
 
 Target state:
 
-- A version PR is opened automatically when changesets land on `main`.
-- Merging the version PR triggers publish.
-- The release workflow creates the git tag after successful npm publish.
-- The release workflow creates a GitHub release using the matching changelog section.
+- Merging the version PR triggers publish automatically after CI is green.
 - The workflow verifies the published package with a fresh install smoke test.
 
 Implementation tasks for that target state are tracked in `TASKS.md`.
