@@ -49,6 +49,7 @@
     "test:integration": "RUN_CODEX_INTEGRATION_TESTS=1 vitest run test/integration",
     "typecheck": "tsc --noEmit",
     "changeset": "changeset",
+    "changeset:check": "node scripts/check-changeset.mjs",
     "changeset:status": "changeset status",
     "version": "changeset version",
     "release": "changeset publish",
