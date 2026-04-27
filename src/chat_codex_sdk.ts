@@ -7,6 +7,7 @@ import type {
   BaseLanguageModelInput,
   StructuredOutputMethodOptions,
 } from "@langchain/core/language_models/base";
+import type { ModelProfile } from "@langchain/core/language_models/profile";
 import { ChatGenerationChunk, type ChatResult } from "@langchain/core/outputs";
 import { RunnableLambda, type Runnable } from "@langchain/core/runnables";
 import type { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager";
@@ -81,6 +82,20 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
 
   override _llmType(): string {
     return "codex-sdk";
+  }
+
+  override get profile(): ModelProfile {
+    return {
+      structuredOutput: true,
+      imageInputs: true,
+      imageUrlInputs: false,
+      pdfInputs: false,
+      audioInputs: false,
+      videoInputs: false,
+      reasoningOutput: true,
+      toolCalling: true,
+      toolChoice: true,
+    };
   }
 
   override invocationParams(options?: this["ParsedCallOptions"]): Record<string, unknown> {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
+import { ToolNode, toolsCondition } from "@langchain/langgraph/prebuilt";
 import { z } from "zod";
 import { ChatCodexSDK } from "../../src/index.js";
 
@@ -74,13 +75,27 @@ describe.skipIf(!runIntegrationTests)("ChatCodexSDK integration", () => {
       expect(Number(toolCall?.args.b)).toBe(7);
       expect(toolCall?.id).toEqual(expect.any(String));
 
+      expect(toolsCondition([new HumanMessage("Call multiply."), first])).toBe("tools");
+
+      const toolResult = asToolNodeResult(
+        await new ToolNode([multiplyTool]).invoke({
+          messages: [new HumanMessage("Call multiply."), first],
+        }),
+      );
+      const toolMessage = toolResult.messages[0];
+
+      expect(toolMessage?.content).toBe("42");
+      expect(toolMessage?.tool_call_id).toBe(toolCall?.id);
+      const toolMessageContent =
+        typeof toolMessage?.content === "string" ? toolMessage.content : "42";
+
       const finalModel = model.bindTools([multiplyTool], { tool_choice: "none" });
       const final = await finalModel.invoke([
         new HumanMessage("Call the multiply tool with a = 6 and b = 7."),
         first,
         new ToolMessage({
-          content: "42",
-          tool_call_id: toolCall?.id ?? "missing-tool-call-id",
+          content: toolMessageContent,
+          tool_call_id: toolMessage?.tool_call_id ?? toolCall?.id ?? "missing-tool-call-id",
           name: "multiply",
         }),
       ]);
@@ -197,6 +212,22 @@ function assertContentBlocksForObservedRuntimeItems(
 
 function isCodexItemType(item: unknown, type: string): boolean {
   return typeof item === "object" && item !== null && "type" in item && item.type === type;
+}
+
+function asToolNodeResult(value: unknown): { messages: ToolMessage[] } {
+  if (!isRecord(value) || !Array.isArray(value.messages)) {
+    throw new Error("ToolNode did not return a messages array.");
+  }
+
+  const messages = value.messages.filter((message): message is ToolMessage =>
+    ToolMessage.isInstance(message),
+  );
+
+  if (messages.length !== value.messages.length) {
+    throw new Error("ToolNode returned a non-tool message.");
+  }
+
+  return { messages };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
