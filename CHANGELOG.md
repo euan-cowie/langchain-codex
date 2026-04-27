@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0
+
+### Minor Changes
+
+- 85668c7: Harden prompt-mediated `bindTools()` tool calling with strict per-tool arg validation, one default repair retry, trace metadata, and explicit compatibility opt-outs.
+
 ## 0.4.0
 
 ### Minor Changes
