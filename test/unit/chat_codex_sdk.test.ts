@@ -1,6 +1,6 @@
 import type { ThreadEvent, ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import type { ThreadItem } from "@openai/codex-sdk";
-import { HumanMessage, ToolMessage } from "@langchain/core/messages";
+import { AIMessageChunk, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -652,6 +652,36 @@ describe("ChatCodexSDK", () => {
     expect(client.startedThread.runInputs[0]).toEqual(
       expect.stringContaining("Tool choice: you must call the multiply tool."),
     );
+  });
+
+  it("streams bound-tool responses through ChatCodexSDK stream chunks", async () => {
+    const client = new FakeCodexClient();
+    client.startedThread.finalResponse = JSON.stringify({
+      type: "tool_calls",
+      content: "",
+      tool_calls: [{ id: "call-1", name: "multiply", args: JSON.stringify({ a: 4, b: 5 }) }],
+    });
+    const modelWithTools = new ChatCodexSDK({ codexClient: asCodexClient(client) }).bindTools([
+      multiplyTool,
+    ]);
+
+    const stream = await modelWithTools.stream("What is 4 * 5?");
+    const chunks: AIMessageChunk[] = [];
+
+    for await (const chunk of stream) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toBeInstanceOf(AIMessageChunk);
+    expect(chunks[0]?.tool_calls).toEqual([
+      {
+        type: "tool_call",
+        id: "call-1",
+        name: "multiply",
+        args: { a: 4, b: 5 },
+      },
+    ]);
   });
 
   it("returns final answers from experimental bindTools when no tool is needed", async () => {

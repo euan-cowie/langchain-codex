@@ -222,6 +222,51 @@ Supported `tool_choice` values are `"auto"`, `"any"`, `"none"`, a tool name stri
 OpenAI-style function tool-choice objects. Streaming tool-call chunks are not native yet; streaming
 with bound tools yields the completed tool-call message as a final chunk.
 
+### LangGraph ToolNode
+
+The experimental tool-call shape is compatible with LangGraph's `ToolNode` and `toolsCondition`
+patterns:
+
+```ts
+import { END, MessagesAnnotation, START, StateGraph } from "@langchain/langgraph";
+import { ToolNode, toolsCondition } from "@langchain/langgraph/prebuilt";
+
+const modelWithTools = model.bindTools([multiply]);
+const toolNode = new ToolNode([multiply]);
+
+const graph = new StateGraph(MessagesAnnotation)
+  .addNode("agent", async (state) => {
+    const response = await modelWithTools.invoke(state.messages);
+    return { messages: [response] };
+  })
+  .addNode("tools", toolNode)
+  .addEdge(START, "agent")
+  .addConditionalEdges("agent", toolsCondition, ["tools", END])
+  .addEdge("tools", "agent")
+  .compile();
+```
+
+This uses LangGraph to execute client-side LangChain tools. It does not turn those tools into native
+Codex runtime tools.
+
+## Model Profile
+
+`ChatCodexSDK` exposes a conservative LangChain model profile so dynamic LangChain and LangGraph
+code can inspect supported capabilities:
+
+```ts
+console.log(model.profile);
+// {
+//   structuredOutput: true,
+//   imageInputs: true,
+//   imageUrlInputs: false,
+//   reasoningOutput: true,
+//   toolCalling: true,
+//   toolChoice: true,
+//   ...
+// }
+```
+
 ## Thread Resume
 
 By default, each call starts a new Codex thread. This keeps `.batch()` behavior predictable and close
