@@ -80,7 +80,7 @@ projects:
 import { ChatCodexSDK } from "langchain-codex";
 ```
 
-CommonJS output is not published in v0.1.
+CommonJS output is not published.
 
 ## Authentication
 
@@ -341,8 +341,8 @@ type ChatCodexSDKFields = {
 
 ## Unsupported Features
 
-Stop sequences are also rejected in v0.1 because Codex runs through the local agent runtime rather
-than a plain text-completion endpoint.
+Stop sequences are rejected because Codex runs through the local agent runtime rather than a plain
+text-completion endpoint.
 
 Raw provider `tools` call options are rejected. Pass tools through `model.bindTools(tools)` so the
 experimental adapter can build the Codex prompt and output schema.
@@ -391,7 +391,7 @@ RUN_CODEX_INTEGRATION_TESTS=1 npm run test:integration
 
 ## Version Compatibility
 
-The first release targets:
+This package targets:
 
 - `@langchain/core` 1.x
 - `@openai/codex-sdk` 0.125.x

@@ -846,7 +846,7 @@ function buildTurnOptions(
 function validateCallOptions(options: ChatCodexSDKCallOptions): void {
   if (options.stop !== undefined && options.stop.length > 0) {
     throw new CodexUnsupportedFeatureError(
-      "ChatCodexSDK does not support stop sequences in v0.1 because Codex runs through the local agent runtime.",
+      "ChatCodexSDK does not support stop sequences because Codex runs through the local agent runtime.",
     );
   }
 
