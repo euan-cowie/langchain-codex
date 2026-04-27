@@ -90,7 +90,7 @@ function appendContentBlock(
 
   if (isImageLikeBlock(block)) {
     throw new CodexUnsupportedFeatureError(
-      "ChatCodexSDK only supports local image paths in v0.1. Remote URLs, base64 data, file IDs, audio, video, and generic files are not supported.",
+      "ChatCodexSDK only supports local image paths. Remote URLs, base64 data, file IDs, audio, video, and generic files are not supported.",
     );
   }
 
