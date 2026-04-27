@@ -16,3 +16,4 @@ export {
   normalizeCodexError,
 } from "./errors.js";
 export { convertMessagesToCodexInput } from "./messages.js";
+export { getCodexThreadId } from "./metadata.js";

@@ -272,11 +272,14 @@ console.log(model.profile);
 By default, each call starts a new Codex thread. This keeps `.batch()` behavior predictable and close
 to other LangChain chat models.
 
-To continue a Codex thread, pass the returned thread ID into a later call:
+To continue a Codex thread, pass the returned thread ID into a later call. The
+`getCodexThreadId()` helper avoids metadata casts:
 
 ```ts
+import { getCodexThreadId } from "langchain-codex";
+
 const first = await model.invoke("Inspect this repository.");
-const threadId = first.response_metadata.codex?.threadId;
+const threadId = getCodexThreadId(first);
 
 const second = await model.invoke(
   "Continue with a concise risk summary.",
@@ -284,8 +287,84 @@ const second = await model.invoke(
 );
 ```
 
-You can also construct a stateful model with a default `threadId`, but avoid concurrent calls on the
-same stateful instance.
+### LangGraph Thread State
+
+For LangGraph, store the Codex `threadId` in graph state or checkpointed state, then pass it back as
+the next model call's `threadId`:
+
+```ts
+import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
+import {
+  Annotation,
+  END,
+  MemorySaver,
+  START,
+  StateGraph,
+  messagesStateReducer,
+} from "@langchain/langgraph";
+import { ChatCodexSDK, getCodexThreadId } from "langchain-codex";
+
+const CodexGraphState = Annotation.Root({
+  messages: Annotation<BaseMessage[]>({
+    reducer: messagesStateReducer,
+    default: () => [],
+  }),
+  codexThreadId: Annotation<string | undefined>(),
+});
+
+const model = new ChatCodexSDK({
+  workingDirectory: process.cwd(),
+  sandboxMode: "read-only",
+});
+
+const graph = new StateGraph(CodexGraphState)
+  .addNode("codex", async (state) => {
+    const inputMessages =
+      state.codexThreadId === undefined ? state.messages : getPendingCodexMessages(state.messages);
+    const response = await model.invoke(
+      inputMessages,
+      state.codexThreadId === undefined ? undefined : { threadId: state.codexThreadId },
+    );
+
+    return {
+      messages: [response],
+      codexThreadId: getCodexThreadId(response) ?? state.codexThreadId,
+    };
+  })
+  .addEdge(START, "codex")
+  .addEdge("codex", END)
+  .compile({ checkpointer: new MemorySaver() });
+
+const config = { configurable: { thread_id: "langgraph-thread" } };
+
+await graph.invoke({ messages: [new HumanMessage("Inspect this repo.")] }, config);
+await graph.invoke({ messages: [new HumanMessage("Continue the review.")] }, config);
+
+function getPendingCodexMessages(messages: BaseMessage[]): BaseMessage[] {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.getType() === "ai") {
+      return messages.slice(index + 1);
+    }
+  }
+
+  return messages;
+}
+```
+
+The LangGraph `thread_id` and Codex `threadId` are different identifiers. LangGraph uses
+`thread_id` to load checkpointed graph state; `ChatCodexSDK` uses `threadId` to resume the persisted
+Codex session.
+
+`messagesStateReducer` stores cumulative graph message history. Once a Codex thread is resumed, pass
+only the new pending graph messages to Codex; the previous transcript is already present in the Codex
+thread.
+
+Thread ownership rules:
+
+- Stateless `ChatCodexSDK` calls start new Codex threads by default.
+- Passing `threadId` resumes that Codex thread for the current call.
+- A model constructed with a default `threadId` sets `maxConcurrency: 1` unless you override it.
+- Branching graph paths should not mutate the same Codex thread concurrently.
 
 ## Working Directory and Sandbox
 

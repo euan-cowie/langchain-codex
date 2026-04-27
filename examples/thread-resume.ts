@@ -1,4 +1,4 @@
-import { ChatCodexSDK } from "../src/index.js";
+import { ChatCodexSDK, getCodexThreadId } from "../src/index.js";
 
 const model = new ChatCodexSDK({
   model: "gpt-5.4",
@@ -6,7 +6,7 @@ const model = new ChatCodexSDK({
 });
 
 const first = await model.invoke("Inspect this repo.");
-const threadId = (first.response_metadata.codex as { threadId?: string } | undefined)?.threadId;
+const threadId = getCodexThreadId(first);
 
 const second = await model.invoke(
   "Continue with a concise risk summary.",

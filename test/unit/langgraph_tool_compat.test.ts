@@ -1,11 +1,19 @@
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
-import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
+import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
-import { END, MessagesAnnotation, START, StateGraph } from "@langchain/langgraph";
+import {
+  Annotation,
+  END,
+  MemorySaver,
+  MessagesAnnotation,
+  START,
+  StateGraph,
+  messagesStateReducer,
+} from "@langchain/langgraph";
 import { ToolNode, toolsCondition } from "@langchain/langgraph/prebuilt";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { ChatCodexSDK } from "../../src/index.js";
+import { ChatCodexSDK, getCodexThreadId } from "../../src/index.js";
 import type { CodexClientLike, CodexInput } from "../../src/types.js";
 
 class SequenceFakeThread {
@@ -45,6 +53,7 @@ class SequenceFakeThread {
 class SequenceFakeCodexClient {
   readonly thread: SequenceFakeThread;
   startThreadOptions: ThreadOptions[] = [];
+  resumeThreadCalls: Array<{ id: string; options: ThreadOptions | undefined }> = [];
 
   constructor(finalResponses: string[]) {
     this.thread = new SequenceFakeThread(finalResponses);
@@ -55,7 +64,9 @@ class SequenceFakeCodexClient {
     return this.thread as never;
   }
 
-  resumeThread() {
+  resumeThread(id: string, options?: ThreadOptions) {
+    this.resumeThreadCalls.push({ id, options });
+    this.thread.id = id;
     return this.thread as never;
   }
 }
@@ -136,7 +147,67 @@ describe("LangGraph tool compatibility", () => {
     );
     expect(client.thread.runInputs[1]).toEqual(expect.stringContaining("42"));
   });
+
+  it("persists Codex thread ids through checkpointed LangGraph state", async () => {
+    const client = new SequenceFakeCodexClient(["First response.", "Second response."]);
+    const model = new ChatCodexSDK({ codexClient: asCodexClient(client) });
+    const graph = new StateGraph(CodexThreadAnnotation)
+      .addNode("agent", async (state: typeof CodexThreadAnnotation.State) => {
+        const inputMessages =
+          state.codexThreadId === undefined
+            ? state.messages
+            : getPendingCodexMessages(state.messages);
+        const response = await model.invoke(
+          inputMessages,
+          state.codexThreadId === undefined ? undefined : { threadId: state.codexThreadId },
+        );
+
+        return {
+          messages: [response],
+          codexThreadId: getCodexThreadId(response) ?? state.codexThreadId,
+        };
+      })
+      .addEdge(START, "agent")
+      .addEdge("agent", END)
+      .compile({ checkpointer: new MemorySaver() });
+    const config = {
+      configurable: {
+        thread_id: "langgraph-checkpoint",
+      },
+    };
+
+    const first = await graph.invoke(
+      { messages: [new HumanMessage("Inspect this repo.")] },
+      config,
+    );
+    const second = await graph.invoke({ messages: [new HumanMessage("Continue.")] }, config);
+
+    expect(first.codexThreadId).toBe("thread-langgraph");
+    expect(second.codexThreadId).toBe("thread-langgraph");
+    expect(client.startThreadOptions).toHaveLength(1);
+    expect(client.resumeThreadCalls).toHaveLength(1);
+    expect(client.resumeThreadCalls[0]?.id).toBe("thread-langgraph");
+    expect(client.thread.runInputs[1]).toBe("Human:\nContinue.");
+  });
 });
+
+const CodexThreadAnnotation = Annotation.Root({
+  messages: Annotation<BaseMessage[]>({
+    reducer: messagesStateReducer,
+    default: () => [],
+  }),
+  codexThreadId: Annotation<string | undefined>(),
+});
+
+function getPendingCodexMessages(messages: BaseMessage[]): BaseMessage[] {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.getType() === "ai") {
+      return messages.slice(index + 1);
+    }
+  }
+
+  return messages;
+}
 
 const multiplyTool = tool(({ a, b }: { a: number; b: number }) => String(a * b), {
   name: "multiply",
