@@ -76,6 +76,39 @@ class FakeCodexClient {
 }
 
 describe("ChatCodexSDK", () => {
+  it("signals tool support as experimental bindTools compatibility", async () => {
+    const client = new FakeCodexClient();
+    client.startedThread.finalResponse = JSON.stringify({
+      type: "final",
+      content: "No client-side tool is needed.",
+      tool_calls: [],
+    });
+    const model = new ChatCodexSDK({ codexClient: asCodexClient(client) });
+
+    expect(model.profile).toMatchObject({
+      toolCalling: true,
+      toolChoice: true,
+    });
+
+    const modelWithTools = model.bindTools([multiplyTool], { tool_choice: "none" });
+    await modelWithTools.invoke("Answer without calling a tool.");
+
+    expect(client.startedThread.runInputs[0]).toEqual(
+      expect.stringContaining("Experimental LangChain tool-calling mode is active."),
+    );
+    expect(client.startedThread.runInputs[0]).toEqual(
+      expect.stringContaining("The tools below are client-side LangChain tools."),
+    );
+    expect(client.startedThread.runOptions[0]?.outputSchema).toMatchObject({
+      properties: {
+        tool_calls: {
+          description:
+            "Client-side LangChain tool calls to execute. Use this only when type is tool_calls.",
+        },
+      },
+    });
+  });
+
   it("invokes Codex through a new thread by default", async () => {
     const client = new FakeCodexClient();
     const model = new ChatCodexSDK({
