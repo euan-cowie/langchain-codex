@@ -102,6 +102,9 @@ function appendContentBlock(
 function isOutputRuntimeBlock(block: Record<string, unknown>): boolean {
   return (
     block.type === "reasoning" ||
+    block.type === "tool_call" ||
+    block.type === "tool_call_chunk" ||
+    block.type === "invalid_tool_call" ||
     block.type === "server_tool_call" ||
     block.type === "server_tool_call_chunk" ||
     block.type === "server_tool_call_result" ||

@@ -7,9 +7,8 @@ import type {
   BaseLanguageModelInput,
   StructuredOutputMethodOptions,
 } from "@langchain/core/language_models/base";
-import type { ModelProfile } from "@langchain/core/language_models/profile";
 import { ChatGenerationChunk, type ChatResult } from "@langchain/core/outputs";
-import { RunnableLambda, type Runnable } from "@langchain/core/runnables";
+import { Runnable } from "@langchain/core/runnables";
 import type { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager";
 import { CodexUnsupportedFeatureError, normalizeCodexError } from "./errors.js";
 import { convertMessagesToCodexInput } from "./messages.js";
@@ -84,7 +83,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
     return "codex-sdk";
   }
 
-  override get profile(): ModelProfile {
+  override get profile() {
     return {
       structuredOutput: true,
       imageInputs: true,
@@ -541,9 +540,43 @@ function createBoundRunnable(
   model: ChatCodexSDK,
   boundOptions: Partial<ChatCodexSDKCallOptions> | undefined,
 ): Runnable<BaseLanguageModelInput, AIMessageChunk, ChatCodexSDKCallOptions> {
-  return RunnableLambda.from<BaseLanguageModelInput, AIMessageChunk, ChatCodexSDKCallOptions>(
-    async (input, options) => model.invoke(input, mergeBoundCallOptions(boundOptions, options)),
-  );
+  return new ChatCodexSDKBoundToolRunnable(model, boundOptions);
+}
+
+class ChatCodexSDKBoundToolRunnable extends Runnable<
+  BaseLanguageModelInput,
+  AIMessageChunk,
+  ChatCodexSDKCallOptions
+> {
+  override lc_namespace = ["langchain", "chat_models", "codex-sdk", "bind_tools"];
+
+  constructor(
+    private readonly model: ChatCodexSDK,
+    private readonly boundOptions: Partial<ChatCodexSDKCallOptions> | undefined,
+  ) {
+    super();
+  }
+
+  override async invoke(
+    input: BaseLanguageModelInput,
+    options?: Partial<ChatCodexSDKCallOptions>,
+  ): Promise<AIMessageChunk> {
+    return this.model.invoke(input, mergeBoundCallOptions(this.boundOptions, options));
+  }
+
+  override async *_streamIterator(
+    input: BaseLanguageModelInput,
+    options?: Partial<ChatCodexSDKCallOptions>,
+  ): AsyncGenerator<AIMessageChunk> {
+    const stream = await this.model.stream(
+      input,
+      mergeBoundCallOptions(this.boundOptions, options),
+    );
+
+    for await (const chunk of stream) {
+      yield chunk;
+    }
+  }
 }
 
 function mergeBoundCallOptions(
