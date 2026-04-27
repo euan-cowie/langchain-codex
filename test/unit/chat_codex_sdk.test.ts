@@ -445,6 +445,66 @@ describe("ChatCodexSDK", () => {
     expect(finalThreadId).toBe("thread-stream");
   });
 
+  it("deduplicates streamed Codex metadata items using latest item state", async () => {
+    const client = new FakeCodexClient();
+    client.startedThread.events = [
+      { type: "thread.started", thread_id: "thread-stream" },
+      {
+        type: "item.started",
+        item: {
+          id: "cmd-1",
+          type: "command_execution",
+          command: "npm test",
+          aggregated_output: "",
+          status: "in_progress",
+        },
+      },
+      {
+        type: "item.updated",
+        item: { id: "msg-1", type: "agent_message", text: "Done" },
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "cmd-1",
+          type: "command_execution",
+          command: "npm test",
+          aggregated_output: "4 passed",
+          exit_code: 0,
+          status: "completed",
+        },
+      },
+      {
+        type: "item.updated",
+        item: { id: "msg-1", type: "agent_message", text: "Done." },
+      },
+      { type: "turn.completed", usage },
+    ];
+    const model = new ChatCodexSDK({ codexClient: asCodexClient(client) });
+
+    const stream = await model.stream("Run tests.");
+    let finalItems: ThreadItem[] | undefined;
+
+    for await (const chunk of stream) {
+      const codex = chunk.response_metadata.codex as { items?: ThreadItem[] } | undefined;
+      finalItems = codex?.items ?? finalItems;
+    }
+
+    expect(finalItems).toEqual([
+      expect.objectContaining({
+        id: "cmd-1",
+        type: "command_execution",
+        aggregated_output: "4 passed",
+        status: "completed",
+      }),
+      expect.objectContaining({
+        id: "msg-1",
+        type: "agent_message",
+        text: "Done.",
+      }),
+    ]);
+  });
+
   it("streams Codex runtime content blocks and custom events", async () => {
     const client = new FakeCodexClient();
     client.startedThread.events = [

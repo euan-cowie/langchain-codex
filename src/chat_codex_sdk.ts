@@ -288,7 +288,8 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
     );
     const seenAgentTextByItemId = new Map<string, string>();
     const seenReasoningTextByItemId = new Map<string, string>();
-    const items: ThreadItem[] = [];
+    const itemOrder: string[] = [];
+    const latestItemById = new Map<string, ThreadItem>();
     let threadId = thread.id ?? options.threadId ?? this.defaultThreadId ?? null;
     let usage: Usage | null = null;
 
@@ -316,7 +317,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
         }
 
         if (isItemEvent(event)) {
-          items.push(event.item);
+          recordStreamItem(event.item, itemOrder, latestItemById);
           const delta = getAgentMessageDelta(event.item, seenAgentTextByItemId);
 
           if (delta.length > 0) {
@@ -358,7 +359,10 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
             threadId,
             model: this.model,
             usage,
-            items: options.includeCodexItems === false ? undefined : items,
+            items:
+              options.includeCodexItems === false
+                ? undefined
+                : getLatestStreamItems(itemOrder, latestItemById),
           });
 
           const message = new AIMessageChunk([]);
@@ -915,6 +919,27 @@ function isItemEvent(
     event.type === "item.updated" ||
     event.type === "item.completed"
   );
+}
+
+function recordStreamItem(
+  item: ThreadItem,
+  itemOrder: string[],
+  latestItemById: Map<string, ThreadItem>,
+): void {
+  if (!latestItemById.has(item.id)) {
+    itemOrder.push(item.id);
+  }
+
+  latestItemById.set(item.id, item);
+}
+
+function getLatestStreamItems(
+  itemOrder: string[],
+  latestItemById: Map<string, ThreadItem>,
+): ThreadItem[] {
+  return itemOrder
+    .map((itemId) => latestItemById.get(itemId))
+    .filter((item): item is ThreadItem => item !== undefined);
 }
 
 function getAgentMessageDelta(item: ThreadItem, previousTextById: Map<string, string>): string {
