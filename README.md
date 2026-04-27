@@ -181,6 +181,18 @@ console.log(result.parsed);
 currently expose a native JavaScript tool registration API, so this adapter uses Codex
 `outputSchema` plus tool instructions to return LangChain `AIMessage.tool_calls`.
 
+There are three distinct tool surfaces:
+
+| Surface | Executed by | How it appears |
+| --- | --- | --- |
+| Codex runtime tools | Codex inside the local turn | Codex content blocks, `response_metadata.codex.items`, and stream events |
+| LangChain client-side tools | Your LangChain or LangGraph app, usually through `ToolNode` | `AIMessage.tool_calls` followed by `ToolMessage` results |
+| `ChatCodexSDK.bindTools()` | Prompt-mediated adapter layer | Experimental compatibility that asks Codex to emit LangChain tool-call JSON |
+
+The `profile.toolCalling` and `profile.toolChoice` flags are `true` for the experimental
+LangChain-compatible `bindTools()` path. They should not be read as native Codex SDK tool
+registration support, and raw provider `tools` call options are still rejected.
+
 ```ts
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
@@ -266,6 +278,11 @@ console.log(model.profile);
 //   ...
 // }
 ```
+
+The tool flags mean `ChatCodexSDK.bindTools()` can produce LangChain-standard tool calls for
+`ToolNode`/`toolsCondition` flows. They do not mean Codex has provider-native JavaScript tool
+registration; Codex's native runtime activity remains visible through content blocks, metadata, and
+stream events.
 
 ## Thread Resume
 

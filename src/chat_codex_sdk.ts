@@ -83,6 +83,13 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
     return "codex-sdk";
   }
 
+  /**
+   * LangChain capability profile.
+   *
+   * The tool flags intentionally advertise experimental `bindTools()` compatibility for
+   * LangChain/LangGraph `ToolNode` flows. They do not mean the Codex SDK exposes native
+   * JavaScript provider-side tool registration.
+   */
   override get profile() {
     return {
       structuredOutput: true,
