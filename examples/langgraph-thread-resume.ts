@@ -21,6 +21,9 @@ const model = new ChatCodexSDK({
   model: "gpt-5.4",
   workingDirectory: process.cwd(),
   sandboxMode: "read-only",
+  approvalPolicy: "never",
+  modelReasoningEffort: "low",
+  timeoutMs: 120_000,
 });
 
 const graph = new StateGraph(CodexGraphState)
@@ -49,19 +52,27 @@ const config = {
 
 await graph.invoke(
   {
-    messages: [new HumanMessage("Inspect this repository.")],
+    messages: [
+      new HumanMessage(
+        'Run exactly `rg \'"name"\' package.json`, then reply with the package name "langchain-codex".',
+      ),
+    ],
   },
   config,
 );
 
 const result = await graph.invoke(
   {
-    messages: [new HumanMessage("Continue with a concise risk summary.")],
+    messages: [
+      new HumanMessage(
+        "Continue from the same Codex thread with one concise sentence about what this package does.",
+      ),
+    ],
   },
   config,
 );
 
-console.log(result.messages.at(-1)?.content);
+console.log(result.messages.at(-1)?.text);
 console.log(result.codexThreadId);
 
 function getPendingCodexMessages(messages: BaseMessage[]): BaseMessage[] {

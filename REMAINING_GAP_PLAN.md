@@ -13,6 +13,12 @@ resume, safe sandbox defaults, package exports, and experimental LangGraph-compa
 The remaining work is mostly product-grade reliability, clearer capability signaling, and better
 LangGraph ergonomics.
 
+## Progress
+
+- PRs 1-4 have been implemented and merged.
+- PR 5 is implemented by the real LangGraph examples work.
+- PR 6 remains as the next integration-confidence task.
+
 ## PR 1: Fix Streaming Metadata
 
 ### Problem
@@ -127,8 +133,8 @@ Patch.
 
 ### Problem
 
-The examples do not yet show the workflows most LangGraph users will try first. In particular,
-`examples/langgraph-agent.ts` is currently a basic `invoke()` example rather than a graph.
+Before PR 5, the examples did not show the workflows most LangGraph users will try first. In
+particular, `examples/langgraph-agent.ts` was a basic `invoke()` example rather than a graph.
 
 ### Scope
 

@@ -6,17 +6,17 @@ See `PARITY_ROADMAP.md` for the staged implementation plan, acceptance criteria,
 
 ## ChatOpenAI Parity
 
-- [ ] Investigate LangChain `bindTools()` support.
-  - Decide whether any Codex-compatible subset can map cleanly to LangChain tool calling.
-  - Do not claim provider tool-call support unless outputs can be represented as real LangChain tool calls.
+- [x] Investigate LangChain `bindTools()` support.
+  - Experimental prompt-mediated compatibility is implemented for LangChain client-side tools.
+  - It is documented as emulation, not native Codex SDK provider tool calling.
 
-- [ ] Explore prompt-mediated tool calling.
-  - Prototype only behind an explicit opt-in flag.
+- [x] Explore prompt-mediated tool calling.
+  - Implemented through `ChatCodexSDK.bindTools()`.
   - Treat this as emulation, not native tool calling.
   - Document that prompt tricks are less reliable than provider-native tool calls.
 
-- [ ] Implement a LangGraph checkpointer integration.
-  - Store Codex `threadId` in checkpoint metadata.
+- [x] Document a LangGraph checkpoint/thread-resume pattern.
+  - Store Codex `threadId` in checkpointed graph state.
   - Support resuming graph execution into the same Codex thread.
   - Define concurrency rules for graph branches that share a Codex thread.
 
@@ -34,7 +34,7 @@ See `PARITY_ROADMAP.md` for the staged implementation plan, acceptance criteria,
 
 - [ ] Add richer LangSmith metadata.
 - [ ] Add configurable Codex metadata verbosity.
-- [ ] Emit custom callback events for Codex command execution, file changes, MCP calls, web search, and todo updates.
+- [x] Emit custom callback events for Codex command execution, file changes, MCP calls, web search, and todo updates.
 - [ ] Add compatibility tests against latest `@langchain/core`.
 - [ ] Investigate `initChatModel` or provider registration hooks if LangChain exposes a stable third-party integration path.
 

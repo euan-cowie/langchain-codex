@@ -110,6 +110,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
       workingDirectory: this.threadOptions.workingDirectory,
       sandboxMode: this.threadOptions.sandboxMode,
       approvalPolicy: this.threadOptions.approvalPolicy,
+      modelReasoningEffort: this.threadOptions.modelReasoningEffort,
       networkAccessEnabled: this.threadOptions.networkAccessEnabled,
       webSearchMode: this.threadOptions.webSearchMode,
       outputSchema: options?.outputSchema,
@@ -147,6 +148,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
       workingDirectory: this.threadOptions.workingDirectory,
       sandboxMode: this.threadOptions.sandboxMode,
       approvalPolicy: this.threadOptions.approvalPolicy,
+      modelReasoningEffort: this.threadOptions.modelReasoningEffort,
       networkAccessEnabled: this.threadOptions.networkAccessEnabled,
       webSearchMode: this.threadOptions.webSearchMode,
     };
