@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+
+### Minor Changes
+
+- 7b099f2: Add `getCodexThreadId()` and document a checkpointed LangGraph thread-resume pattern.
+
+### Patch Changes
+
+- 2b1f546: Deduplicate streamed Codex metadata items so final stream metadata reports the latest state for each runtime item.
+- c886e86: Clarify that tool profile support means experimental prompt-mediated LangChain `bindTools()` compatibility, not native Codex SDK tool registration.
+- 5029c68: Add runnable LangGraph examples for ToolNode loops, createReactAgent, thread resume, streaming Codex content blocks/events, and explicit Codex reasoning effort configuration.
+- 60b1cb8: Reject unsupported `withStructuredOutput()` modes with clear errors and document the Codex `outputSchema` semantics.
+
 ## 0.3.0
 
 ### Minor Changes
