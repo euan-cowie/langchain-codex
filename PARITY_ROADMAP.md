@@ -5,7 +5,7 @@ Date: 2026-04-26
 Status update: this roadmap is historical. The adapter now includes Codex content blocks,
 `streamEvents()` custom events, a model profile, Codex `outputSchema` structured output semantics,
 experimental prompt-mediated `bindTools()` compatibility, and documented LangGraph thread resume
-examples. Remaining work is tracked in `REMAINING_GAP_PLAN.md`.
+examples. See `README.md` for the current package state.
 
 This document defines the next implementation steps for bringing `langchain-codex` closer to the
 ergonomics of `ChatOpenAI` and `ChatAnthropic`, while preserving Codex's local-agent execution
