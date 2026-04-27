@@ -36,17 +36,7 @@ export function createStructuredOutputRunnable<RunOutput extends Record<string, 
   schema: unknown,
   config?: StructuredOutputConfig<boolean>,
 ): Runnable<BaseLanguageModelInput, RunOutput | { raw: BaseMessage; parsed: RunOutput }> {
-  if (config?.method === "functionCalling") {
-    throw new CodexUnsupportedFeatureError(
-      "ChatCodexSDK.withStructuredOutput() uses Codex outputSchema. LangChain function-calling structured output is not supported.",
-    );
-  }
-
-  if (config?.method !== undefined && !["jsonSchema", "jsonMode"].includes(config.method)) {
-    throw new CodexUnsupportedFeatureError(
-      `Unsupported structured output method "${config.method}". Use "jsonSchema" for Codex-native outputSchema.`,
-    );
-  }
+  validateStructuredOutputConfig(config);
 
   const outputSchema = toCodexOutputSchema(schema, config?.name);
   const validator = isZodLikeSchema<RunOutput>(schema) ? schema : undefined;
@@ -74,6 +64,32 @@ export function createStructuredOutputRunnable<RunOutput extends Record<string, 
 
     return parsed;
   });
+}
+
+function validateStructuredOutputConfig(config: StructuredOutputConfig<boolean> | undefined): void {
+  if (config?.strict !== undefined) {
+    throw new CodexUnsupportedFeatureError(
+      'ChatCodexSDK.withStructuredOutput() uses Codex outputSchema and does not support the LangChain "strict" option. Omit "strict"; Codex applies the provided schema per turn.',
+    );
+  }
+
+  if (config?.method === "functionCalling") {
+    throw new CodexUnsupportedFeatureError(
+      'ChatCodexSDK.withStructuredOutput() uses Codex outputSchema. LangChain method "functionCalling" is not supported.',
+    );
+  }
+
+  if (config?.method === "jsonMode") {
+    throw new CodexUnsupportedFeatureError(
+      'ChatCodexSDK.withStructuredOutput() uses Codex outputSchema. LangChain method "jsonMode" is not supported because Codex structured output is schema-based. Use "jsonSchema" or omit "method".',
+    );
+  }
+
+  if (config?.method !== undefined && config.method !== "jsonSchema") {
+    throw new CodexUnsupportedFeatureError(
+      `Unsupported structured output method "${config.method}". ChatCodexSDK.withStructuredOutput() supports only "jsonSchema" because Codex uses outputSchema.`,
+    );
+  }
 }
 
 export function toCodexOutputSchema(schema: unknown, name?: string): Record<string, unknown> {

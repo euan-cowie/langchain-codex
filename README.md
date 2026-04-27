@@ -165,6 +165,11 @@ const result = await structured.invoke("Review this repo.");
 console.log(result.riskLevel);
 ```
 
+`withStructuredOutput()` uses the same Codex `outputSchema` path. Omit `method`, or pass
+`{ method: "jsonSchema" }` when code needs to be explicit. OpenAI-style structured-output modes do
+not map to Codex here: `method: "functionCalling"`, `method: "jsonMode"`, and `strict` are rejected
+with `CodexUnsupportedFeatureError`.
+
 Use `includeRaw` when you need the original LangChain message:
 
 ```ts
