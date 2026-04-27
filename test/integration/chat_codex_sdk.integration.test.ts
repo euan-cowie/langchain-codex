@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { HumanMessage, ToolMessage } from "@langchain/core/messages";
+import { tool } from "@langchain/core/tools";
+import { z } from "zod";
 import { ChatCodexSDK } from "../../src/index.js";
 
 const runIntegrationTests = process.env.RUN_CODEX_INTEGRATION_TESTS === "1";
@@ -55,6 +58,40 @@ describe.skipIf(!runIntegrationTests)("ChatCodexSDK integration", () => {
   );
 
   it(
+    "returns LangChain tool calls through experimental bindTools",
+    async () => {
+      const model = createIntegrationModel();
+      const forcedToolModel = model.bindTools([multiplyTool], { tool_choice: "multiply" });
+
+      const first = await forcedToolModel.invoke(
+        "Call the multiply tool with a = 6 and b = 7. Do not answer directly.",
+      );
+      const toolCall = first.tool_calls?.[0];
+
+      expect(toolCall).toBeDefined();
+      expect(toolCall?.name).toBe("multiply");
+      expect(Number(toolCall?.args.a)).toBe(6);
+      expect(Number(toolCall?.args.b)).toBe(7);
+      expect(toolCall?.id).toEqual(expect.any(String));
+
+      const finalModel = model.bindTools([multiplyTool], { tool_choice: "none" });
+      const final = await finalModel.invoke([
+        new HumanMessage("Call the multiply tool with a = 6 and b = 7."),
+        first,
+        new ToolMessage({
+          content: "42",
+          tool_call_id: toolCall?.id ?? "missing-tool-call-id",
+          name: "multiply",
+        }),
+      ]);
+
+      expect(final.tool_calls ?? []).toHaveLength(0);
+      expect(final.text).toContain("42");
+    },
+    integrationTimeoutMs,
+  );
+
+  it(
     "streams local Codex chunks and emits real codex custom events",
     async () => {
       const model = createIntegrationModel();
@@ -91,6 +128,15 @@ describe.skipIf(!runIntegrationTests)("ChatCodexSDK integration", () => {
     },
     integrationTimeoutMs,
   );
+});
+
+const multiplyTool = tool(({ a, b }: { a: number; b: number }) => a * b, {
+  name: "multiply",
+  description: "Multiply two numbers.",
+  schema: z.object({
+    a: z.number(),
+    b: z.number(),
+  }),
 });
 
 function createIntegrationModel(): ChatCodexSDK {

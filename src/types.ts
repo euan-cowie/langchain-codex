@@ -14,6 +14,7 @@ import type {
   BaseChatModelCallOptions,
   BaseChatModelParams,
 } from "@langchain/core/language_models/chat_models";
+import type { CodexToolCallingConfig } from "./tool_calling.js";
 
 export type CodexUsage = Usage;
 
@@ -57,6 +58,9 @@ export type ChatCodexSDKCallOptions = BaseChatModelCallOptions & {
   threadId?: string;
   timeoutMs?: number;
   includeCodexItems?: boolean;
+
+  /** @internal Experimental prompt-mediated LangChain tool-calling mode. */
+  codexToolCalling?: CodexToolCallingConfig;
 };
 
 export type CodexClientLike = Pick<Codex, "startThread" | "resumeThread">;

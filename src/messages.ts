@@ -33,6 +33,7 @@ export function convertMessagesToCodexInput(messages: BaseMessage[]): CodexInput
 function appendMessage(builder: MutableCodexInputBuilder, message: BaseMessage): void {
   appendText(builder, `${roleLabel(message)}:\n`);
   appendContent(builder, message.content, message.type === "ai");
+  appendAssistantToolCalls(builder, message);
   appendText(builder, "\n\n");
 }
 
@@ -139,7 +140,7 @@ function roleLabel(message: BaseMessage): string {
     case "ai":
       return "Assistant";
     case "tool":
-      return "Tool";
+      return toolRoleLabel(message);
     case "function":
       return "Function";
     case "generic":
@@ -147,6 +148,78 @@ function roleLabel(message: BaseMessage): string {
     default:
       return capitalize(message.type);
   }
+}
+
+function appendAssistantToolCalls(builder: MutableCodexInputBuilder, message: BaseMessage): void {
+  if (message.type !== "ai") {
+    return;
+  }
+
+  const toolCalls = getToolCalls(message);
+  if (toolCalls.length === 0) {
+    return;
+  }
+
+  if (message.text.trim().length > 0) {
+    appendText(builder, "\n");
+  }
+
+  appendText(builder, "Tool calls:\n");
+  appendText(
+    builder,
+    toolCalls
+      .map(
+        (toolCall) =>
+          `- id: ${toolCall.id ?? "unknown"}\n  name: ${toolCall.name}\n  args: ${JSON.stringify(toolCall.args)}`,
+      )
+      .join("\n"),
+  );
+}
+
+function toolRoleLabel(message: BaseMessage): string {
+  const toolCallId = getStringProperty(message, "tool_call_id");
+  const name = getStringProperty(message, "name");
+
+  if (toolCallId === undefined) {
+    return "Tool";
+  }
+
+  return name === undefined
+    ? `Tool result for ${toolCallId}`
+    : `Tool result (${name}) for ${toolCallId}`;
+}
+
+function getToolCalls(
+  message: BaseMessage,
+): Array<{ id?: string; name: string; args: Record<string, unknown> }> {
+  const toolCalls = (message as { tool_calls?: unknown }).tool_calls;
+
+  if (!Array.isArray(toolCalls)) {
+    return [];
+  }
+
+  return toolCalls.filter(isToolCall);
+}
+
+function isToolCall(value: unknown): value is {
+  id?: string;
+  name: string;
+  args: Record<string, unknown>;
+} {
+  return (
+    isRecord(value) &&
+    (value.id === undefined || typeof value.id === "string") &&
+    typeof value.name === "string" &&
+    isRecord(value.args)
+  );
+}
+
+function getStringProperty(value: unknown, key: string): string | undefined {
+  if (!isRecord(value) || typeof value[key] !== "string") {
+    return undefined;
+  }
+
+  return value[key];
 }
 
 function getLocalImagePath(block: Record<string, unknown>): string | undefined {

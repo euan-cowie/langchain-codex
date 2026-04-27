@@ -1,14 +1,14 @@
 import { Codex } from "@openai/codex-sdk";
 import type { ThreadEvent, ThreadItem, ThreadOptions, TurnOptions, Usage } from "@openai/codex-sdk";
 import { AIMessage, AIMessageChunk } from "@langchain/core/messages";
-import type { AIMessageFields, BaseMessage } from "@langchain/core/messages";
+import type { AIMessageChunkFields, AIMessageFields, BaseMessage } from "@langchain/core/messages";
 import { BaseChatModel, type BindToolsInput } from "@langchain/core/language_models/chat_models";
 import type {
   BaseLanguageModelInput,
   StructuredOutputMethodOptions,
 } from "@langchain/core/language_models/base";
 import { ChatGenerationChunk, type ChatResult } from "@langchain/core/outputs";
-import type { Runnable } from "@langchain/core/runnables";
+import { RunnableLambda, type Runnable } from "@langchain/core/runnables";
 import type { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager";
 import { CodexUnsupportedFeatureError, normalizeCodexError } from "./errors.js";
 import { convertMessagesToCodexInput } from "./messages.js";
@@ -27,6 +27,14 @@ import type {
   CodexClientLike,
   CodexThreadLike,
 } from "./types.js";
+import {
+  createCodexToolCallingConfig,
+  createToolCallingOutputSchema,
+  parseCodexToolCallingResponse,
+  prependToolCallingInstructions,
+  type CodexToolCallingConfig,
+  type CodexToolCallingResult,
+} from "./tool_calling.js";
 
 export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessageChunk> {
   static override lc_name(): string {
@@ -61,7 +69,14 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
   }
 
   override get callKeys(): string[] {
-    return [...super.callKeys, "outputSchema", "threadId", "timeoutMs", "includeCodexItems"];
+    return [
+      ...super.callKeys,
+      "outputSchema",
+      "threadId",
+      "timeoutMs",
+      "includeCodexItems",
+      "codexToolCalling",
+    ];
   }
 
   override _llmType(): string {
@@ -77,6 +92,15 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
       networkAccessEnabled: this.threadOptions.networkAccessEnabled,
       webSearchMode: this.threadOptions.webSearchMode,
       outputSchema: options?.outputSchema,
+      ...(options?.codexToolCalling === undefined
+        ? {}
+        : {
+            toolCalling: {
+              mode: "experimental",
+              tools: options.codexToolCalling.tools.map((tool) => tool.name),
+              toolChoice: options.codexToolCalling.toolChoice,
+            },
+          }),
     };
   }
 
@@ -146,6 +170,14 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
   ): Promise<ChatResult> {
     validateCallOptions(options);
 
+    if (options.codexToolCalling !== undefined) {
+      return this._generateWithBoundTools(
+        messages,
+        options as this["ParsedCallOptions"] & { codexToolCalling: CodexToolCallingConfig },
+        runManager,
+      );
+    }
+
     const input = convertMessagesToCodexInput(messages);
     const thread = this.resolveThread(options.threadId);
     const signalContext = createSignalContext(
@@ -203,6 +235,36 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
     runManager?: CallbackManagerForLLMRun,
   ): AsyncGenerator<ChatGenerationChunk> {
     validateCallOptions(options);
+
+    if (options.codexToolCalling !== undefined) {
+      const result = await this._generate(messages, options, runManager);
+      const generation = result.generations[0];
+
+      if (generation !== undefined) {
+        const chunkFields = {
+          text: generation.text,
+          message: aiMessageToChunk(generation.message as AIMessage),
+        };
+        const chunk = new ChatGenerationChunk(
+          generation.generationInfo === undefined
+            ? chunkFields
+            : { ...chunkFields, generationInfo: generation.generationInfo },
+        );
+
+        await runManager?.handleLLMNewToken(
+          generation.text,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { chunk },
+        );
+
+        yield chunk;
+      }
+
+      return;
+    }
 
     const input = convertMessagesToCodexInput(messages);
     const thread = this.resolveThread(options.threadId);
@@ -311,12 +373,16 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
     tools: BindToolsInput[],
     kwargs?: Partial<ChatCodexSDKCallOptions>,
   ): Runnable<BaseLanguageModelInput, AIMessageChunk, ChatCodexSDKCallOptions> {
-    void tools;
-    void kwargs;
+    if (tools.length === 0) {
+      return createBoundRunnable(this, kwargs);
+    }
 
-    throw new CodexUnsupportedFeatureError(
-      "ChatCodexSDK does not support LangChain bindTools() in v0.1. Codex has its own local tools and agent runtime; use Codex sandbox/config options instead.",
-    );
+    const codexToolCalling = createCodexToolCallingConfig(tools, kwargs);
+
+    return createBoundRunnable(this, {
+      ...kwargs,
+      codexToolCalling,
+    });
   }
 
   override withStructuredOutput<
@@ -342,6 +408,72 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
     return createStructuredOutputRunnable(this, outputSchema, config as never);
   }
 
+  private async _generateWithBoundTools(
+    messages: BaseMessage[],
+    options: this["ParsedCallOptions"] & { codexToolCalling: CodexToolCallingConfig },
+    runManager?: CallbackManagerForLLMRun,
+  ): Promise<ChatResult> {
+    const input = prependToolCallingInstructions(
+      convertMessagesToCodexInput(messages),
+      options.codexToolCalling,
+    );
+    const thread = this.resolveThread(options.threadId);
+    const signalContext = createSignalContext(
+      options.signal,
+      options.timeoutMs ?? this.defaultTimeoutMs,
+    );
+
+    try {
+      const turn = await thread.run(
+        input,
+        buildTurnOptions(
+          {
+            ...options,
+            outputSchema: createToolCallingOutputSchema(options.codexToolCalling),
+          },
+          signalContext.signal,
+        ),
+      );
+      const threadId = thread.id ?? options.threadId ?? this.defaultThreadId ?? null;
+      const responseMetadata = toCodexResponseMetadata({
+        threadId,
+        model: this.model,
+        usage: turn.usage,
+        items: options.includeCodexItems === false ? undefined : turn.items,
+      });
+      const usageMetadata = toUsageMetadata(turn.usage);
+      const toolCallingResult = parseCodexToolCallingResponse(
+        turn.finalResponse,
+        options.codexToolCalling,
+      );
+      const message = createToolCallingMessage(toolCallingResult, responseMetadata);
+      if (usageMetadata !== undefined) {
+        (message as unknown as { usage_metadata?: typeof usageMetadata }).usage_metadata =
+          usageMetadata;
+      }
+      await emitCompletedTurnEvents(runManager, threadId, turn.items, turn.usage);
+      const llmOutput = {
+        tokenUsage: toTokenUsage(turn.usage),
+        ...responseMetadata,
+      };
+
+      return {
+        generations: [
+          {
+            text: message.text,
+            message,
+            generationInfo: responseMetadata,
+          },
+        ],
+        llmOutput,
+      };
+    } catch (error) {
+      throw normalizeCodexError(error);
+    } finally {
+      signalContext.dispose();
+    }
+  }
+
   private resolveThread(threadId?: string): CodexThreadLike {
     const resolvedThreadId = threadId ?? this.defaultThreadId;
 
@@ -351,6 +483,68 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
 
     return this.codexClient.startThread(this.threadOptions);
   }
+}
+
+function createToolCallingMessage(
+  result: CodexToolCallingResult,
+  responseMetadata: Record<string, unknown>,
+): AIMessage {
+  const fields: AIMessageFields = {
+    content: result.content,
+    response_metadata: responseMetadata,
+  };
+
+  if (result.type === "tool_calls") {
+    fields.tool_calls = result.toolCalls;
+  }
+
+  return new AIMessage(fields);
+}
+
+function aiMessageToChunk(message: AIMessage): AIMessageChunk {
+  const fields: AIMessageChunkFields = {
+    content: message.content,
+    response_metadata: message.response_metadata,
+  };
+
+  if (message.tool_calls !== undefined) {
+    fields.tool_calls = message.tool_calls;
+  }
+
+  if (message.invalid_tool_calls !== undefined) {
+    fields.invalid_tool_calls = message.invalid_tool_calls;
+  }
+
+  if (message.usage_metadata !== undefined) {
+    fields.usage_metadata = message.usage_metadata;
+  }
+
+  return new AIMessageChunk(fields);
+}
+
+function createBoundRunnable(
+  model: ChatCodexSDK,
+  boundOptions: Partial<ChatCodexSDKCallOptions> | undefined,
+): Runnable<BaseLanguageModelInput, AIMessageChunk, ChatCodexSDKCallOptions> {
+  return RunnableLambda.from<BaseLanguageModelInput, AIMessageChunk, ChatCodexSDKCallOptions>(
+    async (input, options) => model.invoke(input, mergeBoundCallOptions(boundOptions, options)),
+  );
+}
+
+function mergeBoundCallOptions(
+  boundOptions: Partial<ChatCodexSDKCallOptions> | undefined,
+  runtimeOptions: Partial<ChatCodexSDKCallOptions> | undefined,
+): Partial<ChatCodexSDKCallOptions> {
+  const merged = {
+    ...(boundOptions ?? {}),
+    ...(runtimeOptions ?? {}),
+  };
+
+  if (boundOptions?.codexToolCalling !== undefined) {
+    merged.codexToolCalling = boundOptions.codexToolCalling;
+  }
+
+  return merged;
 }
 
 function createCodexMessage({
@@ -608,11 +802,23 @@ function validateCallOptions(options: ChatCodexSDKCallOptions): void {
     );
   }
 
+  if (options.codexToolCalling !== undefined && options.outputSchema !== undefined) {
+    throw new CodexUnsupportedFeatureError(
+      "ChatCodexSDK.bindTools() cannot be combined with outputSchema or withStructuredOutput() because experimental tool calling uses Codex outputSchema internally.",
+    );
+  }
+
   const looseOptions = options as Record<string, unknown>;
 
-  if (looseOptions.tools !== undefined || looseOptions.tool_choice !== undefined) {
+  if (looseOptions.tools !== undefined) {
     throw new CodexUnsupportedFeatureError(
-      "ChatCodexSDK does not support LangChain provider tool calling in v0.1. Use Codex local tools and sandbox configuration instead.",
+      "Pass LangChain tools through ChatCodexSDK.bindTools() instead of raw call option tools.",
+    );
+  }
+
+  if (looseOptions.tool_choice !== undefined && options.codexToolCalling === undefined) {
+    throw new CodexUnsupportedFeatureError(
+      "Pass tool_choice through ChatCodexSDK.bindTools(tools, { tool_choice }) so it can be applied by the experimental Codex tool-calling adapter.",
     );
   }
 }
