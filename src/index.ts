@@ -17,3 +17,4 @@ export {
 } from "./errors.js";
 export { convertMessagesToCodexInput } from "./messages.js";
 export { getCodexThreadId } from "./metadata.js";
+export type { ToolCallValidationMode } from "./tool_calling.js";

@@ -10,7 +10,11 @@ import type {
 import { ChatGenerationChunk, type ChatResult } from "@langchain/core/outputs";
 import { Runnable } from "@langchain/core/runnables";
 import type { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager";
-import { CodexUnsupportedFeatureError, normalizeCodexError } from "./errors.js";
+import {
+  CodexStructuredOutputError,
+  CodexUnsupportedFeatureError,
+  normalizeCodexError,
+} from "./errors.js";
 import { convertMessagesToCodexInput } from "./messages.js";
 import { createStructuredOutputRunnable } from "./structured_output.js";
 import { toCodexResponseMetadata, toTokenUsage, toUsageMetadata } from "./metadata.js";
@@ -34,6 +38,8 @@ import {
   prependToolCallingInstructions,
   type CodexToolCallingConfig,
   type CodexToolCallingResult,
+  type NormalizedToolChoice,
+  type ToolCallValidationMode,
 } from "./tool_calling.js";
 
 export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessageChunk> {
@@ -50,6 +56,8 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
   private readonly threadOptions: ThreadOptions;
   private readonly defaultThreadId: string | undefined;
   private readonly defaultTimeoutMs: number | undefined;
+  private readonly defaultToolCallValidation: ToolCallValidationMode;
+  private readonly defaultToolCallRepairRetries: number;
 
   constructor(fields: ChatCodexSDKFields = {}) {
     const baseFields = { ...fields };
@@ -62,6 +70,10 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
     this.model = fields.model;
     this.defaultThreadId = fields.threadId;
     this.defaultTimeoutMs = fields.timeoutMs;
+    this.defaultToolCallValidation = normalizeToolCallValidation(fields.toolCallValidation);
+    this.defaultToolCallRepairRetries = normalizeToolCallRepairRetries(
+      fields.toolCallRepairRetries,
+    );
 
     this.clientOptions = buildClientOptions(fields);
     this.threadOptions = buildThreadOptions(fields);
@@ -76,6 +88,8 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
       "timeoutMs",
       "includeCodexItems",
       "codexToolCalling",
+      "toolCallValidation",
+      "toolCallRepairRetries",
     ];
   }
 
@@ -121,6 +135,12 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
               mode: "experimental",
               tools: options.codexToolCalling.tools.map((tool) => tool.name),
               toolChoice: options.codexToolCalling.toolChoice,
+              validation: normalizeToolCallValidation(
+                options.toolCallValidation ?? this.defaultToolCallValidation,
+              ),
+              repairRetries: normalizeToolCallRepairRetries(
+                options.toolCallRepairRetries ?? this.defaultToolCallRepairRetries,
+              ),
             },
           }),
     };
@@ -440,60 +460,125 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
     options: this["ParsedCallOptions"] & { codexToolCalling: CodexToolCallingConfig },
     runManager?: CallbackManagerForLLMRun,
   ): Promise<ChatResult> {
+    const validationMode = normalizeToolCallValidation(
+      options.toolCallValidation ?? this.defaultToolCallValidation,
+    );
+    const repairRetries = normalizeToolCallRepairRetries(
+      options.toolCallRepairRetries ?? this.defaultToolCallRepairRetries,
+    );
+    const outputSchema = createToolCallingOutputSchema(options.codexToolCalling, validationMode);
     const input = prependToolCallingInstructions(
       convertMessagesToCodexInput(messages),
       options.codexToolCalling,
+      validationMode,
     );
     const thread = this.resolveThread(options.threadId);
     const signalContext = createSignalContext(
       options.signal,
       options.timeoutMs ?? this.defaultTimeoutMs,
     );
+    const usages: Usage[] = [];
+    const validationErrors: ToolCallingValidationSummary[] = [];
+    let attempt = 0;
+    let nextInput = input;
 
     try {
-      const turn = await thread.run(
-        input,
-        buildTurnOptions(
-          {
-            ...options,
-            outputSchema: createToolCallingOutputSchema(options.codexToolCalling),
-          },
-          signalContext.signal,
-        ),
-      );
-      const threadId = thread.id ?? options.threadId ?? this.defaultThreadId ?? null;
-      const responseMetadata = toCodexResponseMetadata({
-        threadId,
-        model: this.model,
-        usage: turn.usage,
-        items: options.includeCodexItems === false ? undefined : turn.items,
-      });
-      const usageMetadata = toUsageMetadata(turn.usage);
-      const toolCallingResult = parseCodexToolCallingResponse(
-        turn.finalResponse,
-        options.codexToolCalling,
-      );
-      const message = createToolCallingMessage(toolCallingResult, responseMetadata);
-      if (usageMetadata !== undefined) {
-        (message as unknown as { usage_metadata?: typeof usageMetadata }).usage_metadata =
-          usageMetadata;
-      }
-      await emitCompletedTurnEvents(runManager, threadId, turn.items, turn.usage);
-      const llmOutput = {
-        tokenUsage: toTokenUsage(turn.usage),
-        ...responseMetadata,
-      };
+      while (true) {
+        attempt += 1;
+        signalContext.signal?.throwIfAborted();
 
-      return {
-        generations: [
-          {
-            text: message.text,
-            message,
-            generationInfo: responseMetadata,
-          },
-        ],
-        llmOutput,
-      };
+        const turn = await thread.run(
+          nextInput,
+          buildTurnOptions(
+            {
+              ...options,
+              outputSchema,
+            },
+            signalContext.signal,
+          ),
+        );
+        const threadId = thread.id ?? options.threadId ?? this.defaultThreadId ?? null;
+
+        if (isUsage(turn.usage)) {
+          usages.push(turn.usage);
+        }
+
+        try {
+          const toolCallingResult = parseCodexToolCallingResponse(
+            turn.finalResponse,
+            options.codexToolCalling,
+            { validationMode },
+          );
+          const aggregatedUsage = aggregateUsages(usages);
+          const toolCallingTrace = createToolCallingTrace({
+            validationMode,
+            toolChoice: options.codexToolCalling.toolChoice,
+            repairRetries,
+            attempts: attempt,
+            validationErrors,
+          });
+          const responseMetadata = withToolCallingTrace(
+            toCodexResponseMetadata({
+              threadId,
+              model: this.model,
+              usage: aggregatedUsage,
+              items: options.includeCodexItems === false ? undefined : turn.items,
+            }),
+            toolCallingTrace,
+          );
+          const usageMetadata = toUsageMetadata(aggregatedUsage);
+          const message = createToolCallingMessage(toolCallingResult, responseMetadata);
+          if (usageMetadata !== undefined) {
+            (message as unknown as { usage_metadata?: typeof usageMetadata }).usage_metadata =
+              usageMetadata;
+          }
+          await emitCompletedTurnEvents(runManager, threadId, turn.items, turn.usage);
+          await emitToolCallingAttemptEvent(runManager, "succeeded", threadId, {
+            attempt,
+            validationMode,
+            toolChoice: serializeToolChoice(options.codexToolCalling.toolChoice),
+            repairAttempt: attempt > 1,
+            resultType: toolCallingResult.type,
+          });
+          await emitToolCallingCompletedEvent(runManager, threadId, toolCallingTrace);
+          const llmOutput = {
+            tokenUsage: toTokenUsage(aggregatedUsage),
+            ...responseMetadata,
+          };
+
+          return {
+            generations: [
+              {
+                text: message.text,
+                message,
+                generationInfo: responseMetadata,
+              },
+            ],
+            llmOutput,
+          };
+        } catch (error) {
+          if (!(error instanceof CodexStructuredOutputError)) {
+            throw error;
+          }
+
+          const summary = summarizeValidationError(error);
+          validationErrors.push({ attempt, summary });
+          await emitToolCallingAttemptEvent(runManager, "failed", threadId, {
+            attempt,
+            validationMode,
+            toolChoice: serializeToolChoice(options.codexToolCalling.toolChoice),
+            repairAttempt: attempt > 1,
+            validationError: summary,
+            exhausted: attempt - 1 >= repairRetries,
+          });
+
+          if (attempt - 1 >= repairRetries) {
+            throw error;
+          }
+
+          nextInput = createToolCallingRepairPrompt(summary);
+        }
+      }
     } catch (error) {
       throw normalizeCodexError(error);
     } finally {
@@ -526,6 +611,108 @@ function createToolCallingMessage(
   }
 
   return new AIMessage(fields);
+}
+
+type ToolCallingValidationSummary = {
+  attempt: number;
+  summary: string;
+};
+
+type ToolCallingTrace = {
+  validationMode: ToolCallValidationMode;
+  toolChoice: string | { kind: "tool"; name: string };
+  repairRetries: number;
+  attempts: number;
+  repairAttempted: boolean;
+  repairSucceeded: boolean;
+  validationErrorSummaries: ToolCallingValidationSummary[];
+};
+
+function createToolCallingTrace({
+  validationMode,
+  toolChoice,
+  repairRetries,
+  attempts,
+  validationErrors,
+}: {
+  validationMode: ToolCallValidationMode;
+  toolChoice: NormalizedToolChoice;
+  repairRetries: number;
+  attempts: number;
+  validationErrors: ToolCallingValidationSummary[];
+}): ToolCallingTrace {
+  return {
+    validationMode,
+    toolChoice: serializeToolChoice(toolChoice),
+    repairRetries,
+    attempts,
+    repairAttempted: attempts > 1,
+    repairSucceeded: attempts > 1 && validationErrors.length > 0,
+    validationErrorSummaries: validationErrors,
+  };
+}
+
+function withToolCallingTrace<T extends Record<string, unknown>>(
+  responseMetadata: T,
+  trace: ToolCallingTrace,
+): T {
+  const codex = isRecord(responseMetadata.codex) ? responseMetadata.codex : {};
+
+  return {
+    ...responseMetadata,
+    codex: {
+      ...codex,
+      toolCalling: trace,
+    },
+  };
+}
+
+function serializeToolChoice(
+  choice: NormalizedToolChoice,
+): string | { kind: "tool"; name: string } {
+  if (choice.kind === "tool") {
+    return { kind: "tool", name: choice.name };
+  }
+
+  return choice.kind;
+}
+
+function createToolCallingRepairPrompt(validationSummary: string): string {
+  return [
+    "Your previous response did not satisfy the LangChain tool-calling JSON protocol.",
+    "Return only corrected JSON that matches the same output schema for this turn.",
+    "Do not include markdown fences or explanatory text.",
+    `Validation error: ${validationSummary}`,
+  ].join("\n");
+}
+
+function summarizeValidationError(error: Error): string {
+  const oneLine = error.message.replace(/\s+/g, " ").trim();
+
+  return oneLine.length <= 500 ? oneLine : `${oneLine.slice(0, 497)}...`;
+}
+
+async function emitToolCallingAttemptEvent(
+  runManager: CallbackManagerForLLMRun | undefined,
+  status: "succeeded" | "failed",
+  threadId: string | null,
+  data: Record<string, unknown>,
+): Promise<void> {
+  await runManager?.handleCustomEvent(
+    `codex.tool_calling.attempt.${status}`,
+    withThreadId(data, threadId),
+  );
+}
+
+async function emitToolCallingCompletedEvent(
+  runManager: CallbackManagerForLLMRun | undefined,
+  threadId: string | null,
+  trace: ToolCallingTrace,
+): Promise<void> {
+  await runManager?.handleCustomEvent(
+    "codex.tool_calling.completed",
+    withThreadId({ toolCalling: trace }, threadId),
+  );
 }
 
 function aiMessageToChunk(message: AIMessage): AIMessageChunk {
@@ -856,6 +1043,34 @@ function buildTurnOptions(
   return turnOptions;
 }
 
+function normalizeToolCallValidation(
+  value: ToolCallValidationMode | undefined,
+): ToolCallValidationMode {
+  if (value === undefined) {
+    return "strict";
+  }
+
+  if (value === "strict" || value === "basic") {
+    return value;
+  }
+
+  throw new CodexUnsupportedFeatureError('toolCallValidation must be either "strict" or "basic".');
+}
+
+function normalizeToolCallRepairRetries(value: number | undefined): number {
+  if (value === undefined) {
+    return 1;
+  }
+
+  if (Number.isInteger(value) && value >= 0 && value <= 3) {
+    return value;
+  }
+
+  throw new CodexUnsupportedFeatureError(
+    "toolCallRepairRetries must be an integer from 0 through 3.",
+  );
+}
+
 function validateCallOptions(options: ChatCodexSDKCallOptions): void {
   if (options.stop !== undefined && options.stop.length > 0) {
     throw new CodexUnsupportedFeatureError(
@@ -882,6 +1097,9 @@ function validateCallOptions(options: ChatCodexSDKCallOptions): void {
       "Pass tool_choice through ChatCodexSDK.bindTools(tools, { tool_choice }) so it can be applied by the experimental Codex tool-calling adapter.",
     );
   }
+
+  normalizeToolCallValidation(options.toolCallValidation);
+  normalizeToolCallRepairRetries(options.toolCallRepairRetries);
 }
 
 function createSignalContext(
@@ -964,6 +1182,27 @@ function getAgentMessageDelta(item: ThreadItem, previousTextById: Map<string, st
   }
 
   return item.text;
+}
+
+function aggregateUsages(usages: Usage[]): Usage | null {
+  if (usages.length === 0) {
+    return null;
+  }
+
+  return usages.reduce<Usage>(
+    (acc, current) => ({
+      input_tokens: acc.input_tokens + current.input_tokens,
+      cached_input_tokens: acc.cached_input_tokens + current.cached_input_tokens,
+      output_tokens: acc.output_tokens + current.output_tokens,
+      reasoning_output_tokens: acc.reasoning_output_tokens + current.reasoning_output_tokens,
+    }),
+    {
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      output_tokens: 0,
+      reasoning_output_tokens: 0,
+    },
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
