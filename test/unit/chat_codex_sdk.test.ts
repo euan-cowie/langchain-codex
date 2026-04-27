@@ -680,6 +680,73 @@ describe("ChatCodexSDK", () => {
     });
   });
 
+  it("returns includeRaw structured output results with the original message", async () => {
+    const client = new FakeCodexClient();
+    client.startedThread.finalResponse = '{"summary":"ok","riskLevel":"low"}';
+    const model = new ChatCodexSDK({ codexClient: asCodexClient(client) });
+    const structured = model.withStructuredOutput(
+      z.object({
+        summary: z.string(),
+        riskLevel: z.enum(["low", "medium", "high"]),
+      }),
+      { includeRaw: true },
+    );
+
+    const response = await structured.invoke("Summarize.");
+
+    expect(response.parsed).toEqual({ summary: "ok", riskLevel: "low" });
+    expect(response.raw.text).toBe('{"summary":"ok","riskLevel":"low"}');
+    expect(response.raw.response_metadata.codex).toMatchObject({
+      threadId: "thread-new",
+      usage,
+    });
+  });
+
+  it("throws structured output errors for malformed JSON", async () => {
+    const client = new FakeCodexClient();
+    client.startedThread.finalResponse = "not json";
+    const model = new ChatCodexSDK({ codexClient: asCodexClient(client) });
+    const structured = model.withStructuredOutput(
+      z.object({
+        summary: z.string(),
+      }),
+    );
+
+    await expect(structured.invoke("Summarize.")).rejects.toThrow(CodexStructuredOutputError);
+  });
+
+  it("throws structured output errors for Zod validation failures", async () => {
+    const client = new FakeCodexClient();
+    client.startedThread.finalResponse = '{"summary":"ok","riskLevel":"urgent"}';
+    const model = new ChatCodexSDK({ codexClient: asCodexClient(client) });
+    const structured = model.withStructuredOutput(
+      z.object({
+        summary: z.string(),
+        riskLevel: z.enum(["low", "medium", "high"]),
+      }),
+    );
+
+    await expect(structured.invoke("Summarize.")).rejects.toThrow(CodexStructuredOutputError);
+  });
+
+  it("rejects unsupported withStructuredOutput modes", () => {
+    const model = new ChatCodexSDK({ codexClient: asCodexClient(new FakeCodexClient()) });
+    const schema = z.object({ summary: z.string() });
+
+    expect(() => model.withStructuredOutput(schema, { strict: true })).toThrow(
+      CodexUnsupportedFeatureError,
+    );
+    expect(() => model.withStructuredOutput(schema, { method: "functionCalling" })).toThrow(
+      CodexUnsupportedFeatureError,
+    );
+    expect(() => model.withStructuredOutput(schema, { method: "jsonMode" })).toThrow(
+      CodexUnsupportedFeatureError,
+    );
+    expect(() => model.withStructuredOutput(schema, { method: "custom" })).toThrow(
+      CodexUnsupportedFeatureError,
+    );
+  });
+
   it("returns LangChain tool calls from experimental bindTools", async () => {
     const client = new FakeCodexClient();
     client.startedThread.finalResponse = JSON.stringify({
