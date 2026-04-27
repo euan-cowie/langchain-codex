@@ -113,6 +113,18 @@ console.log(response.content);
 console.log(response.response_metadata.codex?.threadId);
 ```
 
+## Examples
+
+The repository includes copyable TypeScript examples:
+
+- `examples/basic.ts` invokes Codex as a LangChain chat model.
+- `examples/streaming.ts` streams text, v1 content blocks, and `streamEvents()` custom Codex events.
+- `examples/structured-output.ts` uses `withStructuredOutput()` with a Zod schema.
+- `examples/thread-resume.ts` resumes a Codex thread across calls.
+- `examples/langgraph-agent.ts` runs a LangGraph `StateGraph` with `ToolNode` and `toolsCondition`.
+- `examples/langgraph-react-agent.ts` shows `createReactAgent` with experimental `bindTools()`.
+- `examples/langgraph-thread-resume.ts` stores Codex thread IDs in checkpointed LangGraph state.
+
 ## Streaming
 
 Codex streaming is event-based. When Codex emits updated `agent_message` items, this adapter diffs
@@ -407,11 +419,17 @@ const model = new ChatCodexSDK({
   workingDirectory: "/path/to/repo",
   sandboxMode: "workspace-write",
   approvalPolicy: "on-request",
+  modelReasoningEffort: "medium",
 });
 ```
 
 Codex requires a git repository by default. For temporary or generated directories, pass
 `skipGitRepoCheck: true` intentionally.
+
+Use `modelReasoningEffort` to set Codex's reasoning effort explicitly. The adapter passes it to the
+Codex thread and exposes it through LangChain invocation and identifying parameters for tracing.
+The examples use `"low"` for faster smoke runs; use `"medium"` or higher for deeper repository
+analysis.
 
 ## Constructor Options
 

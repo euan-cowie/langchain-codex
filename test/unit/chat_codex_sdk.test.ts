@@ -139,6 +139,27 @@ describe("ChatCodexSDK", () => {
     expect(client.startedThread.runInputs[0]).toBe("Human:\nReview this repo.");
   });
 
+  it("surfaces Codex reasoning effort through LangChain params and thread options", async () => {
+    const client = new FakeCodexClient();
+    const model = new ChatCodexSDK({
+      model: "gpt-5.4",
+      modelReasoningEffort: "low",
+      codexClient: asCodexClient(client),
+    });
+
+    await model.invoke("Review this repo.");
+
+    expect(client.startThreadOptions[0]).toMatchObject({
+      modelReasoningEffort: "low",
+    });
+    expect(model.invocationParams()).toMatchObject({
+      modelReasoningEffort: "low",
+    });
+    expect(model._identifyingParams()).toMatchObject({
+      modelReasoningEffort: "low",
+    });
+  });
+
   it("surfaces Codex runtime items as LangChain content blocks", async () => {
     const client = new FakeCodexClient();
     client.startedThread.finalResponse = "Tests passed.";

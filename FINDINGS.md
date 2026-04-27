@@ -2,6 +2,11 @@
 
 Date: 2026-04-26
 
+Historical note: this document records the initial repository review. Several recommendations here
+have since been implemented, including content blocks, custom stream events, model profile,
+structured-output semantics, experimental `bindTools()` compatibility, and LangGraph thread-resume
+examples. See `README.md` and `REMAINING_GAP_PLAN.md` for the current package state.
+
 ## Executive Summary
 
 `langchain-codex` is already implemented as a LangChain chat model adapter: `ChatCodexSDK`
@@ -17,7 +22,7 @@ Codex's different execution model: Codex executes local shell, patch, MCP, web, 
 inside its own turn, while LangChain client-side tool calling expects the model to return
 `AIMessage.tool_calls` for the host app or agent loop to execute.
 
-## Current Repo State
+## Repo State At Review Time
 
 - Local checkout was clean at review time.
 - GitHub repository: `euan-cowie/langchain-codex`
@@ -70,10 +75,11 @@ Relevant files:
 - `test/unit/structured_output.test.ts`
 - `test/unit/chat_codex_sdk.test.ts`
 
-### Tool Calling Should Stay Unsupported for Now
+### Tool Calling Was Initially Deferred
 
-`bindTools()` currently throws `CodexUnsupportedFeatureError`. That is the correct behavior until the
-package can represent tool calls as real LangChain tool calls.
+At review time, `bindTools()` threw `CodexUnsupportedFeatureError`. The package now implements
+experimental prompt-mediated `bindTools()` compatibility for LangChain client-side tools, while the
+README clearly distinguishes that emulation from native Codex SDK provider tool registration.
 
 LangChain client-side tool calling means:
 
@@ -89,15 +95,15 @@ Codex behaves differently:
 - Those operations appear in Codex SDK `ThreadItem` events, not as pending LangChain
   `AIMessage.tool_calls`.
 
-Claiming `bindTools()` support via prompt emulation would make the adapter look more compatible than
-it really is and would likely break LangChain agent expectations.
+The important product constraint remains: prompt-mediated `bindTools()` should not be described as
+native provider tool calling.
 
 Relevant files:
 
 - `src/chat_codex_sdk.ts`
 - `TASKS.md`
 
-### Main Integration Gap: Codex Events Are Hidden
+### Initial Integration Gap: Codex Events Were Hidden
 
 Codex SDK exposes structured items such as:
 
@@ -110,24 +116,22 @@ Codex SDK exposes structured items such as:
 - `todo_list`
 - `error`
 
-The adapter currently keeps these mostly in `response_metadata.codex.items`. Streaming only turns
-`agent_message` item text changes into `AIMessageChunk` text deltas.
-
-This loses the main advantage of Codex inside LangChain: apps, LangGraph runs, and LangSmith traces
-cannot easily observe command execution, patch application, MCP calls, web search, todo changes, and
-reasoning as first-class stream events or content blocks.
+The adapter now exposes Codex runtime activity through content blocks, `response_metadata.codex.items`,
+and custom stream events, so apps, LangGraph runs, and LangSmith traces can observe command
+execution, patch application, MCP calls, web search, todo changes, and reasoning without parsing raw
+SDK payloads first.
 
 Relevant files:
 
 - `src/chat_codex_sdk.ts`
 - `src/metadata.ts`
 
-### Missing Model Profile
+### Model Profile
 
 LangChain 1.1 model profiles let applications discover model capabilities dynamically. The adapter
-does not currently override `profile`, so consumers see the empty base profile.
+now exposes a profile for supported Codex capabilities.
 
-The adapter should expose a conservative profile, for example:
+The current profile includes:
 
 ```ts
 {
@@ -135,12 +139,13 @@ The adapter should expose a conservative profile, for example:
   imageInputs: true,
   imageUrlInputs: false,
   reasoningOutput: true,
-  toolCalling: false,
+  toolCalling: true,
+  toolChoice: true,
 }
 ```
 
-Do not set `toolCalling: true` until `bindTools()` returns real LangChain tool calls with a valid
-execution loop.
+The tool flags refer to the tested experimental `bindTools()` compatibility path, not native Codex
+SDK tool registration.
 
 ### Multimodal Input Is Conservative but Reasonable
 
@@ -158,7 +163,9 @@ Relevant files:
 - `src/messages.ts`
 - `test/unit/messages.test.ts`
 
-## Recommended Next PR
+## Original Recommended Next PR
+
+This recommendation was implemented by later work.
 
 Title suggestion:
 
@@ -182,8 +189,8 @@ Recommended scope:
 5. Add a `profile` getter with conservative capability flags.
 6. Add unit tests using fake Codex stream events.
 7. Update README examples to show `message.contentBlocks` and `streamEvents()`.
-8. Keep `bindTools()` unsupported, but revise the docs/error message to distinguish client-side
-   LangChain tool calling from Codex server-side tool activity.
+8. Keep capability signaling honest by distinguishing client-side LangChain tool calling from Codex
+   server-side tool activity.
 
 ## Suggested Event Mapping
 
@@ -198,7 +205,7 @@ Recommended scope:
 | `todo_list`         | `non_standard`                                   | Useful for UI and traces, but not a model text block.                               |
 | `error`             | `non_standard` plus error metadata               | Keep errors visible without pretending they are natural language.                   |
 
-## Why Not `bindTools()` First
+## Original Tool-Calling Ordering Rationale
 
 `ChatOpenAI` and `ChatAnthropic` advertise tool calling because their APIs can return structured
 tool-call requests for the caller to execute. LangChain's docs describe this as a client-side loop:
@@ -209,12 +216,12 @@ concept for server-side tool use: the model/tool provider performs tool activity
 conversation turn and exposes those invocations/results in message content blocks. That is a better
 fit for Codex.
 
-So the correct ordering is:
+The original recommended ordering was:
 
 1. Surface Codex's built-in tool/runtime events as server-side content blocks and callback events.
-2. Add a model `profile` that clearly says native LangChain client-side `toolCalling` is false.
-3. Only later explore opt-in prompt-mediated tool calling, labeled as emulation and kept separate
-   from `bindTools()` unless it can satisfy LangChain's actual tool-call contract.
+2. Add a model `profile` with accurate capability flags.
+3. Explore prompt-mediated tool calling only if it can satisfy LangChain's actual tool-call
+   contract and can be labeled clearly as emulation rather than native provider tool calling.
 
 ## Verification Performed
 

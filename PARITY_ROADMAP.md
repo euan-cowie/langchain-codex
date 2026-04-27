@@ -2,6 +2,11 @@
 
 Date: 2026-04-26
 
+Status update: this roadmap is historical. The adapter now includes Codex content blocks,
+`streamEvents()` custom events, a model profile, Codex `outputSchema` structured output semantics,
+experimental prompt-mediated `bindTools()` compatibility, and documented LangGraph thread resume
+examples. Remaining work is tracked in `REMAINING_GAP_PLAN.md`.
+
 This document defines the next implementation steps for bringing `langchain-codex` closer to the
 ergonomics of `ChatOpenAI` and `ChatAnthropic`, while preserving Codex's local-agent execution
 model.
@@ -25,14 +30,14 @@ The goal is therefore:
 | ------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | Chat model interface      | Implemented via `BaseChatModel`.                                 | Keep stable and add compatibility coverage.                                                                              |
 | Invocation                | Implemented with `thread.run()`.                                 | Keep aligned with LangChain input/output expectations.                                                                   |
-| Streaming                 | Text deltas from `agent_message` item updates.                   | Also stream Codex runtime events as content blocks and callback events.                                                  |
+| Streaming                 | Text deltas, Codex content blocks, and custom callback events.    | Keep documenting Codex's item/event-based streaming model.                                                               |
 | Token usage               | Mapped into `usage_metadata` and `tokenUsage`.                   | Keep; add cached/reasoning detail in metadata where useful.                                                              |
-| Structured output         | Implemented through Codex `outputSchema`.                        | Clarify `strict`, expand schema support where practical, test edge cases.                                                |
-| Tool calling              | Explicitly unsupported.                                          | Keep unsupported until true client-side tool calls are possible; expose Codex tool activity as server-side events first. |
-| Server-side tool activity | Present in `response_metadata.codex.items`, but not first-class. | Map command/MCP/web/file/todo events into LangChain content blocks and custom events.                                    |
+| Structured output         | Implemented through Codex `outputSchema`; unsupported modes reject clearly. | Expand schema support where practical.                                                                             |
+| Tool calling              | Experimental prompt-mediated `bindTools()` compatibility.        | Keep documenting that this is not native provider tool calling.                                                          |
+| Server-side tool activity | Exposed through content blocks, metadata, and custom events.      | Continue aligning new Codex item types with LangChain surfaces.                                                          |
 | Multimodal input          | Local images only.                                               | Add safe URL/base64 materialization only if warranted.                                                                   |
-| Model profile             | Missing.                                                         | Add conservative `profile` flags for dynamic LangChain consumers.                                                        |
-| LangGraph state           | Thread IDs returned in metadata.                                 | Add a documented checkpoint/resume pattern.                                                                              |
+| Model profile             | Implemented.                                                     | Keep capability signaling accurate as behavior evolves.                                                                  |
+| LangGraph state           | Documented checkpoint/resume pattern with `getCodexThreadId()`.  | Keep examples aligned with LangGraph releases.                                                                           |
 
 ## Phase 1: Surface Codex Runtime Events
 
@@ -236,19 +241,14 @@ contract:
 - LangChain agents can execute the calls and feed back `ToolMessage` results.
 - A second model invocation can use those `ToolMessage` results correctly.
 
-### Likely Outcomes
+### Implemented Outcome
 
-Preferred near-term outcome:
-
-- Keep `bindTools()` unsupported.
-- Improve the error message to say Codex server-side tool activity is exposed through content blocks
-  and stream events.
-
-Possible later outcome:
-
-- Add an explicitly named opt-in method for prompt-mediated tool-call emulation.
-- Do not call this native provider tool calling.
-- Do not set `profile.toolCalling = true` unless compatibility is proven against LangChain agents.
+- `bindTools()` provides experimental prompt-mediated compatibility with LangChain client-side tool
+  calls.
+- Codex server-side tool activity is exposed separately through content blocks and stream events.
+- Docs state that this is not native Codex SDK provider tool registration.
+- `profile.toolCalling` and `profile.toolChoice` are true because compatibility is covered by
+  LangGraph `ToolNode` and `createReactAgent` tests.
 
 ## Phase 8: Package and Docs Polish
 

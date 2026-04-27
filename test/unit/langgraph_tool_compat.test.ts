@@ -10,7 +10,7 @@ import {
   StateGraph,
   messagesStateReducer,
 } from "@langchain/langgraph";
-import { ToolNode, toolsCondition } from "@langchain/langgraph/prebuilt";
+import { ToolNode, createReactAgent, toolsCondition } from "@langchain/langgraph/prebuilt";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { ChatCodexSDK, getCodexThreadId } from "../../src/index.js";
@@ -146,6 +146,30 @@ describe("LangGraph tool compatibility", () => {
       expect.stringContaining("Tool result (multiply) for call-1:"),
     );
     expect(client.thread.runInputs[1]).toEqual(expect.stringContaining("42"));
+  });
+
+  it("runs createReactAgent with ChatCodexSDK bindTools compatibility", async () => {
+    const client = new SequenceFakeCodexClient([
+      toolCallsResponse([{ id: "call-1", name: "multiply", args: { a: 6, b: 7 } }]),
+      finalResponse("6 * 7 is 42."),
+    ]);
+    const model = new ChatCodexSDK({ codexClient: asCodexClient(client) });
+    const agent = createReactAgent({
+      llm: model,
+      tools: [multiplyTool],
+      prompt: "Use the multiply tool when arithmetic is requested.",
+    });
+
+    const result = await agent.invoke({
+      messages: [new HumanMessage("What is 6 * 7?")],
+    });
+    const finalMessage = result.messages.at(-1);
+
+    expect(finalMessage).toBeInstanceOf(AIMessage);
+    expect(finalMessage?.text).toBe("6 * 7 is 42.");
+    expect(client.thread.runInputs[1]).toEqual(
+      expect.stringContaining("Tool result (multiply) for call-1:"),
+    );
   });
 
   it("persists Codex thread ids through checkpointed LangGraph state", async () => {

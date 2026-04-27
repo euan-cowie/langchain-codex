@@ -4,6 +4,10 @@ import { ChatCodexSDK } from "../src/index.js";
 const model = new ChatCodexSDK({
   model: "gpt-5.4",
   workingDirectory: process.cwd(),
+  sandboxMode: "read-only",
+  approvalPolicy: "never",
+  modelReasoningEffort: "low",
+  timeoutMs: 120_000,
 });
 
 const structured = model.withStructuredOutput(
@@ -13,5 +17,7 @@ const structured = model.withStructuredOutput(
   }),
 );
 
-const response = await structured.invoke("Review this repo and summarize the risks.");
+const response = await structured.invoke(
+  'Run exactly `rg \'"name"|"description"\' package.json`, then summarize the package named "langchain-codex".',
+);
 console.log(response);
