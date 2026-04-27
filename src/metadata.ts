@@ -2,6 +2,19 @@ import type { ThreadItem, Usage } from "@openai/codex-sdk";
 import type { UsageMetadata } from "@langchain/core/messages";
 import type { ChatCodexSDKResponseMetadata } from "./types.js";
 
+export function getCodexThreadId(message: {
+  response_metadata?: unknown;
+}): string | undefined {
+  const responseMetadata = message.response_metadata;
+  if (!isRecord(responseMetadata) || !isRecord(responseMetadata.codex)) {
+    return undefined;
+  }
+
+  return typeof responseMetadata.codex.threadId === "string"
+    ? responseMetadata.codex.threadId
+    : undefined;
+}
+
 export function toUsageMetadata(usage: Usage | null | undefined): UsageMetadata | undefined {
   if (usage == null) {
     return undefined;
@@ -58,4 +71,8 @@ export function toCodexResponseMetadata({
   }
 
   return { codex };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
