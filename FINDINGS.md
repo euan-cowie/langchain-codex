@@ -5,7 +5,7 @@ Date: 2026-04-26
 Historical note: this document records the initial repository review. Several recommendations here
 have since been implemented, including content blocks, custom stream events, model profile,
 structured-output semantics, experimental `bindTools()` compatibility, and LangGraph thread-resume
-examples. See `README.md` and `REMAINING_GAP_PLAN.md` for the current package state.
+examples. See `README.md` for the current package state.
 
 ## Executive Summary
 

@@ -36,6 +36,28 @@ describe("check-changeset script", () => {
 
     expect(() => runCheck(repository)).toThrow(/does not include a changeset/);
   });
+
+  it("allows deleting unpublished planning docs without a changeset", () => {
+    const repository = createRepository();
+    write(repository, "REMAINING_GAP_PLAN.md", "# Remaining Gap Plan\n");
+    commitAll(repository, "add planning doc");
+    branch(repository, "remove-plan");
+    remove(repository, "REMAINING_GAP_PLAN.md");
+    commitAll(repository, "remove planning doc");
+
+    expect(() => runCheck(repository)).not.toThrow();
+  });
+
+  it("allows changeset-check script updates without a changeset", () => {
+    const repository = createRepository();
+    write(repository, "scripts/check-changeset.mjs", "console.log('old');\n");
+    commitAll(repository, "add checker script");
+    branch(repository, "update-checker");
+    write(repository, "scripts/check-changeset.mjs", "console.log('new');\n");
+    commitAll(repository, "update checker script");
+
+    expect(() => runCheck(repository)).not.toThrow();
+  });
 });
 
 function createRepository(): string {

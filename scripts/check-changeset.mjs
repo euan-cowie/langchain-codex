@@ -80,7 +80,9 @@ function isPackageImpactingFile(file) {
     file === "FINDINGS.md" ||
     file === "PARITY_ROADMAP.md" ||
     file === "RELEASE_CHECKLIST.md" ||
+    file === "REMAINING_GAP_PLAN.md" ||
     file === "SECURITY.md" ||
+    file === "scripts/check-changeset.mjs" ||
     file === "TASKS.md" ||
     file === "VERSIONING.md"
   ) {
