@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+### Minor Changes
+
+- c4ec7e9: Add experimental prompt-mediated `bindTools()` support that returns LangChain tool calls from Codex structured output.
+- af21862: Expose a conservative LangChain model profile and verify experimental tool calls against LangGraph ToolNode workflows.
+- 00e6e49: Surface Codex runtime activity through LangChain content blocks and custom stream events.
+
+### Patch Changes
+
+- 52d8c4f: Remove stale v0.1 wording from published README guidance and unsupported-feature errors.
+
 ## 0.2.0
 
 ### Minor Changes
