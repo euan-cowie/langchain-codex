@@ -71,8 +71,8 @@ describe.skipIf(!runIntegrationTests)("ChatCodexSDK integration", () => {
 
       expect(toolCall).toBeDefined();
       expect(toolCall?.name).toBe("multiply");
-      expect(Number(toolCall?.args.a)).toBe(6);
-      expect(Number(toolCall?.args.b)).toBe(7);
+      expect(toolCall?.args.a).toBe(6);
+      expect(toolCall?.args.b).toBe(7);
       expect(toolCall?.id).toEqual(expect.any(String));
 
       expect(toolsCondition([new HumanMessage("Call multiply."), first])).toBe("tools");
@@ -143,6 +143,27 @@ describe.skipIf(!runIntegrationTests)("ChatCodexSDK integration", () => {
     },
     integrationTimeoutMs,
   );
+});
+
+describe.skip("ChatCodexSDK prompt-mediated tool-calling reliability eval", () => {
+  it.each([
+    "irrelevant text around JSON",
+    "prompt injection asking to bypass tool schema",
+    "multiple available tools with one correct forced choice",
+    "nested object and array parameter schemas",
+    "optional fields omitted and present",
+    "large integer and floating-point arguments",
+    "follow-up ToolMessage turn requiring a final answer",
+  ])("handles adversarial case: %s", async () => {
+    const model = createIntegrationModel();
+    const modelWithTools = model.bindTools([multiplyTool], {
+      tool_choice: "auto",
+      toolCallValidation: "strict",
+      toolCallRepairRetries: 1,
+    });
+
+    await modelWithTools.invoke("Manual reliability eval placeholder.");
+  });
 });
 
 const multiplyTool = tool(({ a, b }: { a: number; b: number }) => a * b, {

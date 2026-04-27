@@ -15,6 +15,7 @@ import type {
   BaseChatModelParams,
 } from "@langchain/core/language_models/chat_models";
 import type { CodexToolCallingConfig } from "./tool_calling.js";
+import type { ToolCallValidationMode } from "./tool_calling.js";
 
 export type CodexUsage = Usage;
 
@@ -24,6 +25,7 @@ export type ChatCodexSDKResponseMetadata = Record<string, unknown> & {
     model?: string;
     usage?: CodexUsage;
     items?: unknown[];
+    toolCalling?: Record<string, unknown>;
   };
 };
 
@@ -48,6 +50,8 @@ export type ChatCodexSDKFields = BaseChatModelParams & {
   codexConfig?: CodexOptions["config"];
 
   timeoutMs?: number;
+  toolCallValidation?: ToolCallValidationMode;
+  toolCallRepairRetries?: number;
 
   /** @internal Used by unit tests and controlled hosts. */
   codexClient?: CodexClientLike;
@@ -58,6 +62,8 @@ export type ChatCodexSDKCallOptions = BaseChatModelCallOptions & {
   threadId?: string;
   timeoutMs?: number;
   includeCodexItems?: boolean;
+  toolCallValidation?: ToolCallValidationMode;
+  toolCallRepairRetries?: number;
 
   /** @internal Experimental prompt-mediated LangChain tool-calling mode. */
   codexToolCalling?: CodexToolCallingConfig;

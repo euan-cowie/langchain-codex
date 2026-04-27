@@ -251,7 +251,7 @@ function toolCallsResponse(
     tool_calls: toolCalls.map((toolCall) => ({
       id: toolCall.id,
       name: toolCall.name,
-      args: JSON.stringify(toolCall.args),
+      args: toolCall.args,
     })),
   });
 }

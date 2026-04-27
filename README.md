@@ -200,15 +200,22 @@ currently expose a native JavaScript tool registration API, so this adapter uses
 
 There are three distinct tool surfaces:
 
-| Surface | Executed by | How it appears |
-| --- | --- | --- |
-| Codex runtime tools | Codex inside the local turn | Codex content blocks, `response_metadata.codex.items`, and stream events |
-| LangChain client-side tools | Your LangChain or LangGraph app, usually through `ToolNode` | `AIMessage.tool_calls` followed by `ToolMessage` results |
-| `ChatCodexSDK.bindTools()` | Prompt-mediated adapter layer | Experimental compatibility that asks Codex to emit LangChain tool-call JSON |
+| Surface                     | Executed by                                                 | How it appears                                                              |
+| --------------------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Codex runtime tools         | Codex inside the local turn                                 | Codex content blocks, `response_metadata.codex.items`, and stream events    |
+| LangChain client-side tools | Your LangChain or LangGraph app, usually through `ToolNode` | `AIMessage.tool_calls` followed by `ToolMessage` results                    |
+| `ChatCodexSDK.bindTools()`  | Prompt-mediated adapter layer                               | Experimental compatibility that asks Codex to emit LangChain tool-call JSON |
 
 The `profile.toolCalling` and `profile.toolChoice` flags are `true` for the experimental
 LangChain-compatible `bindTools()` path. They should not be read as native Codex SDK tool
 registration support, and raw provider `tools` call options are still rejected.
+
+By default, bound-tool responses are treated as an unreliable protocol boundary. `ChatCodexSDK`
+asks Codex for a per-tool structured-output schema, validates the returned tool name and args, and
+retries once in the same Codex thread if the response is malformed or does not match the selected
+tool schema. Zod tool schemas are checked with the original `safeParse` logic so refinements still
+apply, while JSON Schema/OpenAI-style tools are checked with Ajv without coercing values or inserting
+defaults.
 
 ```ts
 import { tool } from "@langchain/core/tools";
@@ -250,6 +257,28 @@ const final = await modelWithTools.invoke([
 Supported `tool_choice` values are `"auto"`, `"any"`, `"none"`, a tool name string, and common
 OpenAI-style function tool-choice objects. Streaming tool-call chunks are not native yet; streaming
 with bound tools yields the completed tool-call message as a final chunk.
+
+Strict validation is the default:
+
+```ts
+const modelWithTools = model.bindTools([multiply], {
+  tool_choice: "auto",
+  toolCallValidation: "strict",
+  toolCallRepairRetries: 1,
+});
+```
+
+Use `toolCallRepairRetries: 0` to disable repair, or raise it up to `3` for workflows that prefer
+extra latency and Codex tokens over surfacing a validation error. Use `toolCallValidation: "basic"`
+only as a compatibility escape hatch for older prompts that emit JSON-encoded string args; basic
+mode still checks the tool-call shape, known tool names, and `tool_choice`, but it does not validate
+args against each tool schema.
+
+For best reliability, keep prompt-mediated tool sets small and give each tool a specific name,
+description, and object schema. In LangGraph, treat `AIMessage.tool_calls` as a request for your
+graph to authorize and execute client-side tools. Put policy checks, allowlists, tenant/user
+authorization, and side-effect controls around the `ToolNode` or the node that dispatches tools;
+Codex is only proposing a LangChain tool call.
 
 ### LangGraph ToolNode
 
