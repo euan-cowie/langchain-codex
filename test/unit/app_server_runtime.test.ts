@@ -229,6 +229,21 @@ describe("AppServerCodexClient", () => {
     await client.close();
   });
 
+  it("closes the transport after the read loop has already failed", async () => {
+    const transport = new FailingReadLoopTransport();
+    const client = new AppServerCodexClient({ transport });
+
+    await expect(withTimeout(client.startThread().run("Trigger read failure."), 5_000)).rejects.toThrow(
+      "malformed app-server stdout",
+    );
+    expect(transport.closeCalls).toBe(0);
+
+    await client.close();
+    await client.close();
+
+    expect(transport.closeCalls).toBe(1);
+  });
+
   it("interrupts App Server turns when streamed events are cancelled", async () => {
     const transport = new FakeAppServerTransport({ holdAfterTurnStarted: true });
     const client = new AppServerCodexClient({ transport });
@@ -912,6 +927,26 @@ class FakeAppServerTransport implements AppServerTransport {
         },
       },
     });
+  }
+}
+
+class FailingReadLoopTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  readonly messages: AsyncIterable<SentMessage> = this.readMessages();
+  closeCalls = 0;
+
+  send(message: unknown): void {
+    this.sent.push(message as SentMessage);
+  }
+
+  close(): void {
+    this.closeCalls += 1;
+  }
+
+  private async *readMessages(): AsyncGenerator<SentMessage> {
+    yield { id: 0, result: { userAgent: "fake" } };
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    throw new Error("malformed app-server stdout");
   }
 }
 

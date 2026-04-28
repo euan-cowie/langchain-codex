@@ -292,6 +292,7 @@ class AppServerConnection {
   private initialized: Promise<void> | null = null;
   private readLoopStarted = false;
   private closed = false;
+  private transportClose: Promise<void> | null = null;
   private readonly pending = new Map<
     JsonRpcId,
     { resolve: (value: unknown) => void; reject: (error: Error) => void }
@@ -323,11 +324,10 @@ class AppServerConnection {
   }
 
   async close(): Promise<void> {
-    if (this.closed) {
-      return;
+    if (!this.closed) {
+      this.failConnection(new Error("Codex app-server connection closed."));
     }
-    this.failConnection(new Error("Codex app-server connection closed."));
-    await this.transport.close();
+    await this.closeTransport();
   }
 
   private ensureInitialized(): Promise<void> {
@@ -402,6 +402,13 @@ class AppServerConnection {
     }
     this.pending.clear();
     this.emitError(error);
+  }
+
+  private closeTransport(): Promise<void> {
+    this.transportClose ??= (async () => {
+      await this.transport.close();
+    })();
+    return this.transportClose;
   }
 
   private handleMessage(message: JsonRpcMessage): void {
