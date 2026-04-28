@@ -458,6 +458,7 @@ class StdioAppServerTransport implements AppServerTransport {
   readonly messages: AsyncIterable<unknown>;
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly stderrChunks: Buffer[] = [];
+  private spawnError: unknown = null;
 
   constructor(options: CodexOptions) {
     const command = options.codexPathOverride ?? process.execPath;
@@ -468,6 +469,9 @@ class StdioAppServerTransport implements AppServerTransport {
     const env = buildEnvironment(options);
 
     this.child = spawn(command, args, { env });
+    this.child.once("error", (error) => {
+      this.spawnError = error;
+    });
     this.child.stderr.on("data", (chunk: Buffer) => {
       this.stderrChunks.push(chunk);
     });
@@ -492,24 +496,18 @@ class StdioAppServerTransport implements AppServerTransport {
     const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       this.child.once("exit", (code, signal) => resolve({ code, signal }));
     });
-    let spawnError: unknown = null;
-    this.child.once("error", (error) => {
-      spawnError = error;
-    });
 
     try {
+      if (this.spawnError !== null) {
+        throw normalizeSpawnError(this.spawnError);
+      }
+
       for await (const line of rl) {
         yield JSON.parse(line) as JsonRpcMessage;
       }
 
-      if (spawnError !== null) {
-        if (spawnError instanceof Error) {
-          const message = spawnError.message;
-          throw new Error(message, { cause: spawnError });
-        }
-        throw new Error(
-          typeof spawnError === "string" ? spawnError : "Unknown Codex app-server spawn error.",
-        );
+      if (this.spawnError !== null) {
+        throw normalizeSpawnError(this.spawnError);
       }
 
       const { code, signal } = await exit;
@@ -579,10 +577,19 @@ function handleTurnNotification(
     case "turn/completed":
       emitTurnCompleted(params, state, queue);
       return;
-    case "error":
-      queue.push({ type: "error", message: getString(params, "message") ?? "Codex app-server error." });
+    case "error": {
+      const error = getRecord(params, "error");
+      if (getBoolean(params, "willRetry") === true) {
+        return;
+      }
+      queue.push({
+        type: "error",
+        message:
+          getString(error, "message") ?? getString(params, "message") ?? "Codex app-server error.",
+      });
       queue.close();
       return;
+    }
     default:
       return;
   }
@@ -883,6 +890,7 @@ function threadResumeParams(options: ThreadOptions): Record<string, unknown> {
     cwd: options.workingDirectory ?? null,
     approvalPolicy: options.approvalPolicy ?? null,
     sandbox: options.sandboxMode ?? null,
+    config: threadConfig(options),
   };
 }
 
@@ -1036,6 +1044,14 @@ function getNumber(value: unknown, key: string): number | undefined {
   return typeof property === "number" ? property : undefined;
 }
 
+function getBoolean(value: unknown, key: string): boolean | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const property = value[key];
+  return typeof property === "boolean" ? property : undefined;
+}
+
 function getArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
@@ -1112,6 +1128,16 @@ function formatTomlKey(key: string): string {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Object.prototype.toString.call(value) === "[object Object]";
+}
+
+function normalizeSpawnError(error: unknown): Error {
+  if (error instanceof Error) {
+    return new Error(error.message, { cause: error });
+  }
+
+  return new Error(
+    typeof error === "string" ? error : "Unknown Codex app-server spawn error.",
+  );
 }
 
 class AsyncQueue<T> implements AsyncIterable<T> {

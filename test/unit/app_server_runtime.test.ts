@@ -154,6 +154,69 @@ describe("AppServerCodexClient", () => {
     await client.close();
   });
 
+  it("keeps active turns open for App Server retry notices", async () => {
+    const transport = new FakeAppServerTransport({ retryErrorBeforeSuccess: true });
+    const client = new AppServerCodexClient({ transport });
+
+    const result = await client.startThread().run("Recover after retry.");
+    await client.close();
+
+    expect(result.finalResponse).toBe("Hello world");
+  });
+
+  it("uses nested App Server error messages for terminal turn failures", async () => {
+    const transport = new FakeAppServerTransport({ fatalErrorBeforeSuccess: true });
+    const client = new AppServerCodexClient({ transport });
+
+    await expect(client.startThread().run("Fail.")).rejects.toThrow(
+      "terminal app-server error",
+    );
+    await client.close();
+  });
+
+  it("preserves App Server thread config when resuming a thread", async () => {
+    const transport = new FakeAppServerTransport();
+    const client = new AppServerCodexClient({ transport });
+    const thread = client.resumeThread("thread-existing", {
+      model: "gpt-5.4",
+      workingDirectory: "/repo",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      networkAccessEnabled: true,
+      webSearchMode: "live",
+    });
+
+    await thread.run("Continue.");
+    await client.close();
+
+    const resume = transport.sent.find((message) => message.method === "thread/resume");
+    expect(resume?.params).toMatchObject({
+      threadId: "thread-existing",
+      model: "gpt-5.4",
+      cwd: "/repo",
+      approvalPolicy: "never",
+      sandbox: "workspace-write",
+      config: {
+        sandbox_workspace_write: { network_access: true },
+        web_search: "live",
+      },
+    });
+  });
+
+  it("surfaces child-process spawn failures without hanging", async () => {
+    const client = new AppServerCodexClient({
+      codexPathOverride: "/tmp/langchain-codex-missing-codex-binary",
+    });
+
+    try {
+      await expect(
+        withTimeout(client.startThread().run("Hello."), 5_000),
+      ).rejects.toThrow(/ENOENT|spawn|no such file/i);
+    } finally {
+      await client.close();
+    }
+  });
+
   it("normalizes object-encoded file-change kinds", async () => {
     const transport = new FakeAppServerTransport({
       completedItems: [
@@ -399,6 +462,7 @@ class FakeAppServerTransport implements AppServerTransport {
   readonly sent: SentMessage[] = [];
   readonly serverRequestResponses: SentMessage[] = [];
   private readonly queue = new MessageQueue<SentMessage>();
+  private threadId = "thread-app";
   readonly messages: AsyncIterable<SentMessage> = this.queue;
 
   constructor(
@@ -408,6 +472,8 @@ class FakeAppServerTransport implements AppServerTransport {
       finalResponse?: string;
       completedItems?: Array<Record<string, unknown>>;
       closeAfterTurnStarted?: boolean;
+      retryErrorBeforeSuccess?: boolean;
+      fatalErrorBeforeSuccess?: boolean;
     } = {},
   ) {}
 
@@ -441,16 +507,29 @@ class FakeAppServerTransport implements AppServerTransport {
         this.queue.push({ id: sent.id, result: { userAgent: "fake" } });
         return;
       case "thread/start":
+        this.threadId = "thread-app";
         this.queue.push({
           id: sent.id,
           result: {
             thread: {
-              id: "thread-app",
+              id: this.threadId,
+            },
+          },
+        });
+        return;
+      case "thread/resume":
+        this.threadId = getSentString(sent.params, "threadId") ?? this.threadId;
+        this.queue.push({
+          id: sent.id,
+          result: {
+            thread: {
+              id: this.threadId,
             },
           },
         });
         return;
       case "turn/start":
+        this.threadId = getSentString(sent.params, "threadId") ?? this.threadId;
         this.queue.push({
           id: sent.id,
           result: {
@@ -465,7 +544,7 @@ class FakeAppServerTransport implements AppServerTransport {
         this.queue.push({
           method: "turn/started",
           params: {
-            threadId: "thread-app",
+            threadId: this.threadId,
             turn: { id: "turn-app" },
           },
         });
@@ -475,6 +554,33 @@ class FakeAppServerTransport implements AppServerTransport {
         }
         if (serverRequest !== undefined) {
           this.queue.push(serverRequest);
+          return;
+        }
+        if (this.options.retryErrorBeforeSuccess === true) {
+          this.queue.push({
+            method: "error",
+            params: {
+              threadId: this.threadId,
+              turnId: "turn-app",
+              willRetry: true,
+              error: {
+                message: "temporary app-server error",
+              },
+            },
+          });
+        }
+        if (this.options.fatalErrorBeforeSuccess === true) {
+          this.queue.push({
+            method: "error",
+            params: {
+              threadId: this.threadId,
+              turnId: "turn-app",
+              willRetry: false,
+              error: {
+                message: "terminal app-server error",
+              },
+            },
+          });
           return;
         }
         this.pushSuccessfulTurnEvents();
@@ -497,7 +603,7 @@ class FakeAppServerTransport implements AppServerTransport {
     this.queue.push({
       method: "item/agentMessage/delta",
       params: {
-        threadId: "thread-app",
+        threadId: this.threadId,
         turnId: "turn-app",
         itemId: "msg-1",
         delta: finalResponse.slice(0, midpoint),
@@ -506,7 +612,7 @@ class FakeAppServerTransport implements AppServerTransport {
     this.queue.push({
       method: "item/agentMessage/delta",
       params: {
-        threadId: "thread-app",
+        threadId: this.threadId,
         turnId: "turn-app",
         itemId: "msg-1",
         delta: finalResponse.slice(midpoint),
@@ -515,7 +621,7 @@ class FakeAppServerTransport implements AppServerTransport {
     this.queue.push({
       method: "item/completed",
       params: {
-        threadId: "thread-app",
+        threadId: this.threadId,
         turnId: "turn-app",
         item: {
           id: "msg-1",
@@ -528,7 +634,7 @@ class FakeAppServerTransport implements AppServerTransport {
       this.queue.push({
         method: "item/completed",
         params: {
-          threadId: "thread-app",
+          threadId: this.threadId,
           turnId: "turn-app",
           item,
         },
@@ -537,7 +643,7 @@ class FakeAppServerTransport implements AppServerTransport {
     this.queue.push({
       method: "thread/tokenUsage/updated",
       params: {
-        threadId: "thread-app",
+        threadId: this.threadId,
         turnId: "turn-app",
         tokenUsage: {
           last: {
@@ -552,7 +658,7 @@ class FakeAppServerTransport implements AppServerTransport {
     this.queue.push({
       method: "turn/completed",
       params: {
-        threadId: "thread-app",
+        threadId: this.threadId,
         turn: {
           id: "turn-app",
           status: "completed",
@@ -572,6 +678,27 @@ const multiplyTool = tool(({ a, b }: { a: number; b: number }) => a * b, {
     b: z.number(),
   }),
 });
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(`Timed out after ${ms}ms.`)), ms);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  });
+}
+
+function getSentString(value: unknown, key: string): string | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const property = (value as Record<string, unknown>)[key];
+  return typeof property === "string" ? property : undefined;
+}
 
 class MessageQueue<T> implements AsyncIterable<T> {
   private readonly values: T[] = [];
