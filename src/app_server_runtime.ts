@@ -12,6 +12,7 @@ import type {
   Usage,
 } from "@openai/codex-sdk";
 import type {
+  CodexAppServerDefaultApprovalDecision,
   CodexAppServerApprovalDecision,
   CodexAppServerApprovalHandler,
   CodexClientLike,
@@ -21,7 +22,7 @@ import type {
 const INTERNAL_ORIGINATOR_ENV = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE";
 const APP_SERVER_ORIGINATOR = "langchain_codex_app_server";
 
-type JsonRpcId = number;
+type JsonRpcId = number | string;
 
 type JsonRpcResponse = {
   id: JsonRpcId;
@@ -52,7 +53,7 @@ export type AppServerTransport = {
 export type AppServerCodexClientOptions = CodexOptions & {
   transport?: AppServerTransport;
   approvalHandler?: CodexAppServerApprovalHandler;
-  defaultApprovalDecision?: CodexAppServerApprovalDecision;
+  defaultApprovalDecision?: CodexAppServerDefaultApprovalDecision;
 };
 
 export class AppServerCodexClient implements CodexClientLike {
@@ -61,7 +62,7 @@ export class AppServerCodexClient implements CodexClientLike {
   constructor(options: AppServerCodexClientOptions = {}) {
     const transport = options.transport ?? new StdioAppServerTransport(options);
     this.connection = new AppServerConnection(transport, {
-      defaultApprovalDecision: options.defaultApprovalDecision ?? "decline",
+      defaultApprovalDecision: options.defaultApprovalDecision ?? "throw",
       ...(options.approvalHandler === undefined
         ? {}
         : { approvalHandler: options.approvalHandler }),
@@ -251,7 +252,7 @@ class AppServerConnection {
     private readonly transport: AppServerTransport,
     private readonly approvals: {
       approvalHandler?: CodexAppServerApprovalHandler;
-      defaultApprovalDecision: CodexAppServerApprovalDecision;
+      defaultApprovalDecision: CodexAppServerDefaultApprovalDecision;
     },
   ) {}
 
@@ -367,12 +368,20 @@ class AppServerConnection {
 
   private async handleServerRequest(message: JsonRpcServerRequest): Promise<void> {
     if (isApprovalRequestMethod(message.method)) {
-      const decision =
-        (await this.approvals.approvalHandler?.({
-          method: message.method,
-          params: message.params,
-        })) ?? this.approvals.defaultApprovalDecision;
-      this.transport.send({ id: message.id, result: { decision } });
+      try {
+        const decision = await this.resolveApprovalDecision(message);
+        this.transport.send({ id: message.id, result: { decision } });
+      } catch (error) {
+        const normalized = error instanceof Error ? error : new Error(String(error));
+        this.transport.send({
+          id: message.id,
+          error: {
+            code: -32000,
+            message: normalized.message,
+          },
+        });
+        this.emitError(normalized);
+      }
       return;
     }
 
@@ -383,6 +392,40 @@ class AppServerConnection {
         message: `Unsupported Codex app-server request: ${message.method}`,
       },
     });
+  }
+
+  private async resolveApprovalDecision(
+    message: JsonRpcServerRequest,
+  ): Promise<CodexAppServerApprovalDecision> {
+    const handlerDecision = await this.approvals.approvalHandler?.({
+      kind: approvalRequestKind(message.method),
+      method: message.method,
+      params: message.params,
+    });
+    const decision = handlerDecision ?? this.approvals.defaultApprovalDecision;
+
+    if (decision === "throw") {
+      throw new Error(
+        `Codex app-server requested ${approvalRequestKind(message.method)} approval, but no appServerApprovalHandler is configured.`,
+      );
+    }
+
+    if (!isApprovalDecision(decision)) {
+      throw new Error(`Invalid Codex app-server approval decision: ${String(decision)}`);
+    }
+
+    return decision;
+  }
+
+  private emitError(error: Error): void {
+    const message: JsonRpcNotification = {
+      method: "error",
+      params: { message: error.message },
+    };
+
+    for (const handler of this.notificationHandlers) {
+      handler(message);
+    }
   }
 }
 
@@ -878,7 +921,7 @@ function resolveCodexEntrypoint(): string {
 function isResponse(message: JsonRpcMessage): message is JsonRpcResponse {
   return (
     isRecord(message) &&
-    typeof (message as { id?: unknown }).id === "number" &&
+    isJsonRpcId((message as { id?: unknown }).id) &&
     !("method" in message)
   );
 }
@@ -895,14 +938,31 @@ function isServerRequest(message: JsonRpcMessage): message is JsonRpcServerReque
   return (
     isRecord(message) &&
     typeof (message as { method?: unknown }).method === "string" &&
-    typeof (message as { id?: unknown }).id === "number"
+    isJsonRpcId((message as { id?: unknown }).id)
   );
+}
+
+function isJsonRpcId(value: unknown): value is JsonRpcId {
+  return typeof value === "number" || typeof value === "string";
 }
 
 function isApprovalRequestMethod(method: string): boolean {
   return (
     method === "item/commandExecution/requestApproval" ||
     method === "item/fileChange/requestApproval"
+  );
+}
+
+function approvalRequestKind(method: string): "command" | "file_change" {
+  return method === "item/commandExecution/requestApproval" ? "command" : "file_change";
+}
+
+function isApprovalDecision(value: unknown): value is CodexAppServerApprovalDecision {
+  return (
+    value === "accept" ||
+    value === "acceptForSession" ||
+    value === "decline" ||
+    value === "cancel"
   );
 }
 

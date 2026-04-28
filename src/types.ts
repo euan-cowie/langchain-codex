@@ -26,7 +26,10 @@ export type CodexAppServerApprovalDecision =
   | "decline"
   | "cancel";
 
+export type CodexAppServerDefaultApprovalDecision = "decline" | "cancel" | "throw";
+
 export type CodexAppServerApprovalRequest = {
+  kind: "command" | "file_change";
   method: string;
   params: unknown;
 };
@@ -66,7 +69,7 @@ export type ChatCodexSDKFields = BaseChatModelParams & {
   codexPathOverride?: string;
   codexConfig?: CodexOptions["config"];
   appServerApprovalHandler?: CodexAppServerApprovalHandler;
-  appServerDefaultApprovalDecision?: CodexAppServerApprovalDecision;
+  appServerDefaultApprovalDecision?: CodexAppServerDefaultApprovalDecision;
 
   timeoutMs?: number;
   toolCallValidation?: ToolCallValidationMode;

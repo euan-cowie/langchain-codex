@@ -5,6 +5,7 @@ export type {
   ChatCodexSDKResponseMetadata,
   ChatCodexSDKRuntime,
   CodexAppServerApprovalDecision,
+  CodexAppServerDefaultApprovalDecision,
   CodexAppServerApprovalHandler,
   CodexAppServerApprovalRequest,
   CodexUsage,

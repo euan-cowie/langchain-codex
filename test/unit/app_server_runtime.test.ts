@@ -99,11 +99,153 @@ describe("AppServerCodexClient", () => {
     expect(text).toBe("Hello world");
     expect(threadId).toBe("thread-app");
   });
+
+  it("routes command approval requests through the configured handler", async () => {
+    const transport = new FakeAppServerTransport({
+      approvalRequest: {
+        id: "approval-command-1",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          itemId: "cmd-1",
+          command: "npm test",
+        },
+      },
+    });
+    const approvals: Array<{ kind: string; method: string; params: unknown }> = [];
+    const client = new AppServerCodexClient({
+      transport,
+      approvalHandler: (request) => {
+        approvals.push(request);
+        return "accept";
+      },
+    });
+
+    const result = await client.startThread().run("Run tests.");
+    await client.close();
+
+    expect(result.finalResponse).toBe("Hello world");
+    expect(approvals).toEqual([
+      {
+        kind: "command",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          itemId: "cmd-1",
+          command: "npm test",
+        },
+      },
+    ]);
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-command-1",
+        result: { decision: "accept" },
+      },
+    ]);
+  });
+
+  it("uses the configured default decision for file-change approval requests", async () => {
+    const transport = new FakeAppServerTransport({
+      approvalRequest: {
+        id: "approval-file-1",
+        method: "item/fileChange/requestApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          itemId: "patch-1",
+          changes: [{ path: "README.md", kind: "update" }],
+        },
+      },
+    });
+    const client = new AppServerCodexClient({
+      transport,
+      defaultApprovalDecision: "cancel",
+    });
+
+    const result = await client.startThread().run("Edit README.");
+    await client.close();
+
+    expect(result.finalResponse).toBe("Hello world");
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-file-1",
+        result: { decision: "cancel" },
+      },
+    ]);
+  });
+
+  it("fails clearly when an approval request has no handler", async () => {
+    const transport = new FakeAppServerTransport({
+      approvalRequest: {
+        id: "approval-command-1",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          itemId: "cmd-1",
+          command: "npm test",
+        },
+      },
+    });
+    const client = new AppServerCodexClient({ transport });
+
+    await expect(client.startThread().run("Run tests.")).rejects.toThrow(
+      "no appServerApprovalHandler is configured",
+    );
+    await client.close();
+
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-command-1",
+        error: {
+          code: -32000,
+          message:
+            "Codex app-server requested command approval, but no appServerApprovalHandler is configured.",
+        },
+      },
+    ]);
+  });
+
+  it("fails clearly when the approval handler throws", async () => {
+    const transport = new FakeAppServerTransport({
+      approvalRequest: {
+        id: "approval-file-1",
+        method: "item/fileChange/requestApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          itemId: "patch-1",
+          changes: [{ path: "README.md", kind: "update" }],
+        },
+      },
+    });
+    const client = new AppServerCodexClient({
+      transport,
+      approvalHandler: () => {
+        throw new Error("approval UI failed");
+      },
+    });
+
+    await expect(client.startThread().run("Edit README.")).rejects.toThrow("approval UI failed");
+    await client.close();
+
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-file-1",
+        error: {
+          code: -32000,
+          message: "approval UI failed",
+        },
+      },
+    ]);
+  });
 });
 
 type SentMessage = {
   method?: string;
-  id?: number;
+  id?: number | string;
   params?: unknown;
   result?: unknown;
   error?: unknown;
@@ -111,12 +253,31 @@ type SentMessage = {
 
 class FakeAppServerTransport implements AppServerTransport {
   readonly sent: SentMessage[] = [];
+  readonly approvalResponses: SentMessage[] = [];
   private readonly queue = new MessageQueue<SentMessage>();
   readonly messages: AsyncIterable<SentMessage> = this.queue;
+
+  constructor(
+    private readonly options: {
+      approvalRequest?: SentMessage & { id: number | string; method: string };
+    } = {},
+  ) {}
 
   send(message: unknown): void {
     const sent = message as SentMessage;
     this.sent.push(sent);
+
+    if (
+      this.options.approvalRequest !== undefined &&
+      sent.id === this.options.approvalRequest.id &&
+      sent.method === undefined
+    ) {
+      this.approvalResponses.push(sent);
+      if (sent.result !== undefined) {
+        this.pushSuccessfulTurnEvents();
+      }
+      return;
+    }
 
     if (sent.id === undefined || sent.method === undefined) {
       return;
@@ -155,63 +316,11 @@ class FakeAppServerTransport implements AppServerTransport {
             turn: { id: "turn-app" },
           },
         });
-        this.queue.push({
-          method: "item/agentMessage/delta",
-          params: {
-            threadId: "thread-app",
-            turnId: "turn-app",
-            itemId: "msg-1",
-            delta: "Hello",
-          },
-        });
-        this.queue.push({
-          method: "item/agentMessage/delta",
-          params: {
-            threadId: "thread-app",
-            turnId: "turn-app",
-            itemId: "msg-1",
-            delta: " world",
-          },
-        });
-        this.queue.push({
-          method: "item/completed",
-          params: {
-            threadId: "thread-app",
-            turnId: "turn-app",
-            item: {
-              id: "msg-1",
-              type: "agentMessage",
-              text: "Hello world",
-            },
-          },
-        });
-        this.queue.push({
-          method: "thread/tokenUsage/updated",
-          params: {
-            threadId: "thread-app",
-            turnId: "turn-app",
-            tokenUsage: {
-              last: {
-                inputTokens: 10,
-                cachedInputTokens: 2,
-                outputTokens: 5,
-                reasoningOutputTokens: 1,
-              },
-            },
-          },
-        });
-        this.queue.push({
-          method: "turn/completed",
-          params: {
-            threadId: "thread-app",
-            turn: {
-              id: "turn-app",
-              status: "completed",
-              items: [],
-              error: null,
-            },
-          },
-        });
+        if (this.options.approvalRequest !== undefined) {
+          this.queue.push(this.options.approvalRequest);
+          return;
+        }
+        this.pushSuccessfulTurnEvents();
         return;
       default:
         this.queue.push({
@@ -223,6 +332,66 @@ class FakeAppServerTransport implements AppServerTransport {
 
   close(): void {
     this.queue.close();
+  }
+
+  private pushSuccessfulTurnEvents(): void {
+    this.queue.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-app",
+        turnId: "turn-app",
+        itemId: "msg-1",
+        delta: "Hello",
+      },
+    });
+    this.queue.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-app",
+        turnId: "turn-app",
+        itemId: "msg-1",
+        delta: " world",
+      },
+    });
+    this.queue.push({
+      method: "item/completed",
+      params: {
+        threadId: "thread-app",
+        turnId: "turn-app",
+        item: {
+          id: "msg-1",
+          type: "agentMessage",
+          text: "Hello world",
+        },
+      },
+    });
+    this.queue.push({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: "thread-app",
+        turnId: "turn-app",
+        tokenUsage: {
+          last: {
+            inputTokens: 10,
+            cachedInputTokens: 2,
+            outputTokens: 5,
+            reasoningOutputTokens: 1,
+          },
+        },
+      },
+    });
+    this.queue.push({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-app",
+        turn: {
+          id: "turn-app",
+          status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+    });
   }
 }
 

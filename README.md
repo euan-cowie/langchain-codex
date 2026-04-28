@@ -91,6 +91,27 @@ The App Server backend speaks to a local `codex app-server` process over stdio. 
 become the default after parity testing covers invocation, streaming, structured output, approval
 handling, cancellation, and process cleanup. Until then, `runtime: "sdk"` remains the default.
 
+When App Server asks the client to approve a command or file change, the adapter calls
+`appServerApprovalHandler`. Without a handler, the default is to fail the turn clearly instead of
+leaving the App Server process waiting:
+
+```ts
+const model = new ChatCodexSDK({
+  runtime: "app-server",
+  approvalPolicy: "on-request",
+  appServerApprovalHandler: async (request) => {
+    if (request.kind === "command") {
+      return "accept";
+    }
+
+    return "decline";
+  },
+});
+```
+
+Set `appServerDefaultApprovalDecision` to `"decline"` or `"cancel"` when a host wants unattended
+approval requests to resolve without throwing.
+
 ## Module Format
 
 `langchain-codex` is ESM-only and supports Node.js 20 or later. Use `import` syntax from ESM
@@ -501,6 +522,15 @@ type ChatCodexSDKFields = {
   apiKey?: string;
   codexPathOverride?: string;
   codexConfig?: Record<string, unknown>;
+  appServerApprovalHandler?: (
+    request: CodexAppServerApprovalRequest,
+  ) =>
+    | "accept"
+    | "acceptForSession"
+    | "decline"
+    | "cancel"
+    | Promise<"accept" | "acceptForSession" | "decline" | "cancel">;
+  appServerDefaultApprovalDecision?: "decline" | "cancel" | "throw";
 
   timeoutMs?: number;
   maxConcurrency?: number;

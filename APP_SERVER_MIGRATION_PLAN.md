@@ -253,18 +253,17 @@ Initial implementation slice completed:
 - Normalized App Server streamed events into the adapter's existing Codex
   event/item shape.
 - Mapped App Server token usage updates into existing usage metadata.
-- Added conservative default approval responses so App Server requests do not
-  hang silently.
+- Added conservative approval handling so App Server requests do not hang
+  silently.
 - Added `ChatCodexSDK.close()` for App Server process cleanup.
 - Kept `runtime: "sdk"` as the default.
 
 Remaining before default flip:
 
-- Run and harden the real App Server integration tests behind
+- Continue hardening the real App Server integration tests behind
   `CODEX_APP_SERVER_INTEGRATION=1`.
-- Expand approval handling tests and document human-in-the-loop patterns.
-- Validate resume, cancellation, structured output, and runtime content blocks
-  against a live `codex app-server` process.
+- Add live coverage for cancellation and approval flows where reliable prompts
+  are practical.
 - Decide whether and when to deprecate the SDK runtime.
 
 Phase 3 follow-up slice added:
@@ -273,3 +272,14 @@ Phase 3 follow-up slice added:
   `streamEvents()`, explicit `threadId` resume, and `withStructuredOutput()`.
 - Updated the App Server handshake to declare `experimentalApi` capability before
   requesting extended persisted history.
+
+Phase 4 follow-up slice added:
+
+- Routed command and file-change approval server requests through
+  `appServerApprovalHandler`.
+- Changed missing App Server approval handlers to fail the active turn clearly by
+  default instead of silently choosing an approval response.
+- Added `appServerDefaultApprovalDecision` for hosts that want unattended
+  requests to resolve as `"decline"` or `"cancel"`.
+- Added unit coverage for command approvals, file-change approvals, default
+  approval responses, and approval handler failures.
