@@ -33,8 +33,8 @@ This package adapts the local Codex runtime to LangChain's `BaseChatModel` inter
 ```text
 LangChain / LangGraph JS
   -> ChatCodexSDK
-    -> @openai/codex-sdk
-      -> local codex CLI runtime
+    -> @openai/codex-sdk or codex app-server
+      -> local Codex runtime
         -> existing Codex auth session or API-key auth
 ```
 
@@ -70,6 +70,26 @@ npm run build
 - Node.js 20 or later.
 - `@openai/codex-sdk`, installed as a runtime dependency of this package.
 - Codex authentication configured through the Codex CLI, IDE/app, or API-key auth.
+
+## Runtime Backend
+
+`ChatCodexSDK` uses the TypeScript Codex SDK backend by default. An experimental App Server backend
+is available for users who want to test the migration path toward Codex's richer client protocol:
+
+```ts
+const model = new ChatCodexSDK({
+  runtime: "app-server",
+  model: "gpt-5.4",
+  workingDirectory: process.cwd(),
+});
+
+const response = await model.invoke("Summarize this repo.");
+await model.close();
+```
+
+The App Server backend speaks to a local `codex app-server` process over stdio. It is intended to
+become the default after parity testing covers invocation, streaming, structured output, approval
+handling, cancellation, and process cleanup. Until then, `runtime: "sdk"` remains the default.
 
 ## Module Format
 
