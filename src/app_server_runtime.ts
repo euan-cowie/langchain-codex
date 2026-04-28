@@ -165,7 +165,8 @@ class AppServerThread implements CodexThreadLike {
 
     try {
       const wasNewThread = this._id === null;
-      await this.ensureThread();
+      await this.ensureThread(turnOptions.signal);
+      turnOptions.signal?.throwIfAborted();
 
       if (this._id === null) {
         throw new Error("Codex app-server did not return a thread id.");
@@ -180,12 +181,36 @@ class AppServerThread implements CodexThreadLike {
         queue.push({ type: "thread.started", thread_id: this._id });
       }
 
-      const startTurn = await this.connection.request("turn/start", {
+      abortListener = this.attachAbortListener(turnOptions.signal, queue, interruptActiveTurn);
+      turnOptions.signal?.throwIfAborted();
+
+      const startTurnPromise = this.connection.request("turn/start", {
         threadId: this._id,
         input: normalizeInput(input),
         outputSchema: turnOptions.outputSchema ?? null,
         ...turnOverrideParams(this.threadOptions),
       });
+      if (turnOptions.signal !== undefined) {
+        void startTurnPromise
+          .then((startTurn) => {
+            if (turnOptions.signal?.aborted !== true || this._id === null) {
+              return;
+            }
+            const completedTurnId = getString(getRecord(startTurn, "turn"), "id");
+            if (completedTurnId === undefined) {
+              return;
+            }
+            void this.connection
+              .request("turn/interrupt", {
+                threadId: this._id,
+                turnId: completedTurnId,
+              })
+              .catch(() => undefined);
+          })
+          .catch(() => undefined);
+      }
+
+      const startTurn = await rejectOnAbort(startTurnPromise, turnOptions.signal);
       const turn = getRecord(startTurn, "turn");
       const turnIdValue = getString(turn, "id");
       if (turnIdValue === undefined) {
@@ -193,8 +218,7 @@ class AppServerThread implements CodexThreadLike {
       }
       turnId = turnIdValue;
       state.turnId = turnId;
-
-      abortListener = this.attachAbortListener(turnOptions.signal, queue, interruptActiveTurn);
+      turnOptions.signal?.throwIfAborted();
 
       for await (const event of queue) {
         if (isTerminalTurnEvent(event)) {
@@ -210,13 +234,16 @@ class AppServerThread implements CodexThreadLike {
     }
   }
 
-  private async ensureThread(): Promise<void> {
+  private async ensureThread(signal: AbortSignal | undefined): Promise<void> {
     if (this.initialized) {
       return;
     }
 
     if (this._id === null) {
-      const result = await this.connection.request("thread/start", threadStartParams(this.threadOptions));
+      const result = await rejectOnAbort(
+        this.connection.request("thread/start", threadStartParams(this.threadOptions)),
+        signal,
+      );
       const thread = getRecord(result, "thread");
       const threadId = getString(thread, "id");
       if (threadId === undefined) {
@@ -224,10 +251,13 @@ class AppServerThread implements CodexThreadLike {
       }
       this._id = threadId;
     } else {
-      await this.connection.request("thread/resume", {
-        threadId: this._id,
-        ...threadResumeParams(this.threadOptions),
-      });
+      await rejectOnAbort(
+        this.connection.request("thread/resume", {
+          threadId: this._id,
+          ...threadResumeParams(this.threadOptions),
+        }),
+        signal,
+      );
     }
 
     this.initialized = true;
@@ -244,7 +274,7 @@ class AppServerThread implements CodexThreadLike {
 
     const abort = () => {
       interruptActiveTurn();
-      queue.fail(signal.reason instanceof Error ? signal.reason : new Error("Codex turn aborted."));
+      queue.fail(abortError(signal));
     };
 
     if (signal.aborted) {
@@ -501,6 +531,9 @@ class StdioAppServerTransport implements AppServerTransport {
   readonly messages: AsyncIterable<unknown>;
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly stderrChunks: Buffer[] = [];
+  private readonly exit: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+  private readonly closePromise: Promise<void>;
+  private childClosed = false;
   private spawnError: unknown = null;
 
   constructor(options: CodexOptions) {
@@ -515,6 +548,15 @@ class StdioAppServerTransport implements AppServerTransport {
     this.child.once("error", (error) => {
       this.spawnError = error;
     });
+    this.exit = new Promise((resolve) => {
+      this.child.once("exit", (code, signal) => resolve({ code, signal }));
+    });
+    this.closePromise = new Promise((resolve) => {
+      this.child.once("close", () => {
+        this.childClosed = true;
+        resolve();
+      });
+    });
     this.child.stderr.on("data", (chunk: Buffer) => {
       this.stderrChunks.push(chunk);
     });
@@ -525,10 +567,11 @@ class StdioAppServerTransport implements AppServerTransport {
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
-  close(): void {
-    if (!this.child.killed) {
+  async close(): Promise<void> {
+    if (!this.child.killed && !this.childClosed) {
       this.child.kill();
     }
+    await this.closePromise;
   }
 
   private async *readMessages(): AsyncGenerator<unknown> {
@@ -536,10 +579,6 @@ class StdioAppServerTransport implements AppServerTransport {
       input: this.child.stdout,
       crlfDelay: Infinity,
     });
-    const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-      this.child.once("exit", (code, signal) => resolve({ code, signal }));
-    });
-
     try {
       if (this.spawnError !== null) {
         throw normalizeSpawnError(this.spawnError);
@@ -553,7 +592,7 @@ class StdioAppServerTransport implements AppServerTransport {
         throw normalizeSpawnError(this.spawnError);
       }
 
-      const { code, signal } = await exit;
+      const { code, signal } = await this.exit;
       if (code !== 0 || signal !== null) {
         const detail = signal === null ? `code ${code ?? 1}` : `signal ${signal}`;
         const stderr = Buffer.concat(this.stderrChunks).toString("utf8").trim();
@@ -745,6 +784,23 @@ function isTerminalTurnEvent(event: ThreadEvent): boolean {
   );
 }
 
+function rejectOnAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) {
+    return promise;
+  }
+  signal.throwIfAborted();
+
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(abortError(signal));
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("Codex turn aborted.");
+}
+
 function normalizeAppServerItem(item: Record<string, unknown> | undefined): ThreadItem | undefined {
   if (item === undefined) {
     return undefined;
@@ -767,7 +823,11 @@ function normalizeAppServerItem(item: Record<string, unknown> | undefined): Thre
       };
     case "commandExecution":
       return normalizeCommandExecutionItem(id, item);
-    case "fileChange":
+    case "fileChange": {
+      const status = normalizePatchStatus(getString(item, "status"));
+      if (status === undefined) {
+        return undefined;
+      }
       return {
         id,
         type: "file_change",
@@ -776,8 +836,9 @@ function normalizeAppServerItem(item: Record<string, unknown> | undefined): Thre
           .filter((change): change is { path: string; kind: "add" | "delete" | "update" } =>
             change !== undefined,
           ),
-        status: normalizePatchStatus(getString(item, "status")),
+        status,
       };
+    }
     case "mcpToolCall":
       return normalizeMcpToolCallItem(id, item);
     case "webSearch":
@@ -900,9 +961,12 @@ function normalizeMcpStatus(
 
 function normalizePatchStatus(
   status: string | undefined,
-): Extract<ThreadItem, { type: "file_change" }>["status"] {
+): Extract<ThreadItem, { type: "file_change" }>["status"] | undefined {
   if (status === "failed" || status === "declined") {
     return "failed";
+  }
+  if (status === "inProgress" || status === "in_progress") {
+    return undefined;
   }
   return "completed";
 }

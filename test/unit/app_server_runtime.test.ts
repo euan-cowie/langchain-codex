@@ -1,3 +1,7 @@
+import { existsSync } from "node:fs";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
@@ -263,6 +267,23 @@ describe("AppServerCodexClient", () => {
     );
   });
 
+  it("honors aborts while waiting for App Server turn/start", async () => {
+    const transport = new DelayedTurnStartTransport();
+    const client = new AppServerCodexClient({ transport });
+    const controller = new AbortController();
+
+    const run = client.startThread().run("Wait for turn start.", {
+      signal: controller.signal,
+    });
+    await waitUntil(() => transport.sent.some((message) => message.method === "turn/start"));
+    controller.abort(new Error("deadline exceeded"));
+
+    await expect(withTimeout(run, 5_000)).rejects.toThrow("deadline exceeded");
+    transport.resolveTurnStart();
+    await waitUntil(() => transport.sent.some((message) => message.method === "turn/interrupt"));
+    await client.close();
+  });
+
   it("handles rejected turn interrupts during abort", async () => {
     const transport = new FakeAppServerTransport({
       holdAfterTurnStarted: true,
@@ -348,6 +369,38 @@ describe("AppServerCodexClient", () => {
     }
   });
 
+  it("waits for stdio App Server child processes to exit on close", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "langchain-codex-close-"));
+    const scriptPath = path.join(dir, "fake-codex.js");
+    const readyPath = path.join(dir, "ready");
+    const markerPath = path.join(dir, "closed");
+    await writeFile(
+      scriptPath,
+      `#!/usr/bin/env node
+const { writeFileSync } = require("node:fs");
+process.stdin.resume();
+process.on("SIGTERM", () => {
+  setTimeout(() => {
+    writeFileSync(${JSON.stringify(markerPath)}, "closed");
+    process.exit(0);
+  }, 50);
+});
+writeFileSync(${JSON.stringify(readyPath)}, "ready");
+`,
+    );
+    await chmod(scriptPath, 0o755);
+
+    try {
+      const client = new AppServerCodexClient({ codexPathOverride: scriptPath });
+      await waitUntil(() => existsSync(readyPath));
+      await client.close();
+
+      expect(existsSync(markerPath)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("normalizes object-encoded file-change kinds", async () => {
     const transport = new FakeAppServerTransport({
       completedItems: [
@@ -376,6 +429,42 @@ describe("AppServerCodexClient", () => {
       status: "completed",
       changes: [{ path: "README.md", kind: "update" }],
     });
+  });
+
+  it("defers in-progress file-change items while streaming", async () => {
+    const transport = new FakeAppServerTransport({
+      startedItems: [
+        {
+          id: "patch-1",
+          type: "fileChange",
+          status: "inProgress",
+          changes: [
+            {
+              path: "README.md",
+              kind: { type: "update", move_path: null },
+              diff: "@@",
+            },
+          ],
+        },
+      ],
+    });
+    const client = new AppServerCodexClient({ transport });
+    const streamed = await client.startThread().runStreamed("Edit README.");
+    const fileChanges: unknown[] = [];
+
+    for await (const event of streamed.events) {
+      if (
+        (event.type === "item.started" ||
+          event.type === "item.updated" ||
+          event.type === "item.completed") &&
+        event.item.type === "file_change"
+      ) {
+        fileChanges.push(event.item);
+      }
+    }
+    await client.close();
+
+    expect(fileChanges).toEqual([]);
   });
 
   it("maps declined command approvals to a terminal failed command status", async () => {
@@ -603,6 +692,7 @@ class FakeAppServerTransport implements AppServerTransport {
       approvalRequest?: SentMessage & { id: number | string; method: string };
       serverRequest?: SentMessage & { id: number | string; method: string };
       finalResponse?: string;
+      startedItems?: Array<Record<string, unknown>>;
       completedItems?: Array<Record<string, unknown>>;
       closeAfterTurnStarted?: boolean;
       holdAfterTurnStarted?: boolean;
@@ -683,6 +773,16 @@ class FakeAppServerTransport implements AppServerTransport {
             turn: { id: "turn-app" },
           },
         });
+        for (const item of this.options.startedItems ?? []) {
+          this.queue.push({
+            method: "item/started",
+            params: {
+              threadId: this.threadId,
+              turnId: "turn-app",
+              item,
+            },
+          });
+        }
         if (this.options.closeAfterTurnStarted === true) {
           this.queue.close();
           return;
@@ -923,6 +1023,71 @@ class InterleavedThreadStartTransport implements AppServerTransport {
         turn: {
           id: turnId,
           status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+    });
+  }
+}
+
+class DelayedTurnStartTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  private readonly queue = new MessageQueue<SentMessage>();
+  private turnStartRequest: SentRequest | null = null;
+  readonly messages: AsyncIterable<SentMessage> = this.queue;
+
+  send(message: unknown): void {
+    const sent = message as SentMessage;
+    this.sent.push(sent);
+
+    if (sent.id === undefined || sent.method === undefined) {
+      return;
+    }
+    const request = sent as SentRequest;
+
+    switch (request.method) {
+      case "initialize":
+        this.queue.push({ id: request.id, result: { userAgent: "fake" } });
+        return;
+      case "thread/start":
+        this.queue.push({
+          id: request.id,
+          result: {
+            thread: {
+              id: "thread-app",
+            },
+          },
+        });
+        return;
+      case "turn/start":
+        this.turnStartRequest = request;
+        return;
+      case "turn/interrupt":
+        this.queue.push({ id: request.id, result: {} });
+        return;
+      default:
+        this.queue.push({
+          id: request.id,
+          error: { message: `Unexpected request: ${request.method}` },
+        });
+    }
+  }
+
+  close(): void {
+    this.queue.close();
+  }
+
+  resolveTurnStart(): void {
+    if (this.turnStartRequest === null) {
+      throw new Error("No delayed turn/start request is pending.");
+    }
+    this.queue.push({
+      id: this.turnStartRequest.id,
+      result: {
+        turn: {
+          id: "turn-app",
+          status: "inProgress",
           items: [],
           error: null,
         },
