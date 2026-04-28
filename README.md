@@ -394,7 +394,8 @@ const second = await model.invoke(
 ### LangGraph Thread State
 
 For LangGraph, store the Codex `threadId` in graph state or checkpointed state, then pass it back as
-the next model call's `threadId`:
+the next model call's `threadId`. The same pattern works with `runtime: "sdk"` and
+`runtime: "app-server"`:
 
 ```ts
 import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
@@ -417,6 +418,7 @@ const CodexGraphState = Annotation.Root({
 });
 
 const model = new ChatCodexSDK({
+  runtime: "app-server",
   workingDirectory: process.cwd(),
   sandboxMode: "read-only",
 });
@@ -443,6 +445,7 @@ const config = { configurable: { thread_id: "langgraph-thread" } };
 
 await graph.invoke({ messages: [new HumanMessage("Inspect this repo.")] }, config);
 await graph.invoke({ messages: [new HumanMessage("Continue the review.")] }, config);
+await model.close();
 
 function getPendingCodexMessages(messages: BaseMessage[]): BaseMessage[] {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -468,6 +471,8 @@ Thread ownership rules:
 - Stateless `ChatCodexSDK` calls start new Codex threads by default.
 - Passing `threadId` resumes that Codex thread for the current call.
 - A model constructed with a default `threadId` sets `maxConcurrency: 1` unless you override it.
+- Do not pass LangGraph's checkpoint `thread_id` as Codex `threadId`; persist the Codex ID returned
+  in `response_metadata.codex.threadId`.
 - Branching graph paths should not mutate the same Codex thread concurrently.
 
 ## Working Directory and Sandbox

@@ -283,3 +283,13 @@ Phase 4 follow-up slice added:
   requests to resolve as `"decline"` or `"cancel"`.
 - Added unit coverage for command approvals, file-change approvals, default
   approval responses, and approval handler failures.
+
+Phase 5 follow-up slice added:
+
+- Updated the LangGraph thread-resume example to make `runtime: "app-server"`
+  selectable and to close the model after use.
+- Added App Server runtime unit coverage for checkpointed Codex `threadId`
+  persistence, pending-message resume, stateless calls without `threadId`, and
+  constructor-level `threadId` ownership.
+- Clarified that LangGraph checkpoint `thread_id` must not be reused as Codex
+  `threadId`; persist the Codex thread ID returned by the model instead.

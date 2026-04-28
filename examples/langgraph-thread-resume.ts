@@ -17,7 +17,10 @@ const CodexGraphState = Annotation.Root({
   codexThreadId: Annotation<string | undefined>(),
 });
 
+const runtime = process.env.CODEX_RUNTIME === "app-server" ? "app-server" : "sdk";
+
 const model = new ChatCodexSDK({
+  runtime,
   model: "gpt-5.4",
   workingDirectory: process.cwd(),
   sandboxMode: "read-only",
@@ -50,30 +53,34 @@ const config = {
   },
 };
 
-await graph.invoke(
-  {
-    messages: [
-      new HumanMessage(
-        'Run exactly `rg \'"name"\' package.json`, then reply with the package name "langchain-codex".',
-      ),
-    ],
-  },
-  config,
-);
+try {
+  await graph.invoke(
+    {
+      messages: [
+        new HumanMessage(
+          'Run exactly `rg \'"name"\' package.json`, then reply with the package name "langchain-codex".',
+        ),
+      ],
+    },
+    config,
+  );
 
-const result = await graph.invoke(
-  {
-    messages: [
-      new HumanMessage(
-        "Continue from the same Codex thread with one concise sentence about what this package does.",
-      ),
-    ],
-  },
-  config,
-);
+  const result = await graph.invoke(
+    {
+      messages: [
+        new HumanMessage(
+          "Continue from the same Codex thread with one concise sentence about what this package does.",
+        ),
+      ],
+    },
+    config,
+  );
 
-console.log(result.messages.at(-1)?.text);
-console.log(result.codexThreadId);
+  console.log(result.messages.at(-1)?.text);
+  console.log(result.codexThreadId);
+} finally {
+  await model.close();
+}
 
 function getPendingCodexMessages(messages: BaseMessage[]): BaseMessage[] {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
