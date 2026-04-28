@@ -293,3 +293,14 @@ Phase 5 follow-up slice added:
   constructor-level `threadId` ownership.
 - Clarified that LangGraph checkpoint `thread_id` must not be reused as Codex
   `threadId`; persist the Codex thread ID returned by the model instead.
+
+Phase 6 follow-up slice added:
+
+- Added App Server runtime coverage for prompt-mediated `bindTools()` through
+  Codex `outputSchema`.
+- Added live App Server integration coverage for LangChain-standard
+  `AIMessage.tool_calls`.
+- Explicitly reject App Server dynamic tool-call server requests instead of
+  presenting them as native LangChain tool calling.
+- Clarified in the README that App Server dynamic tools remain separate from
+  `ChatCodexSDK.bindTools()`.

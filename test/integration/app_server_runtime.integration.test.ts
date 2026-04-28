@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { ChatCodexSDK } from "../../src/index.js";
 
@@ -136,6 +137,38 @@ describe.skipIf(!runAppServerIntegrationTests)("ChatCodexSDK App Server integrat
     },
     appServerIntegrationTimeoutMs,
   );
+
+  it(
+    "returns LangChain tool calls through prompt-mediated bindTools",
+    async () => {
+      const model = createAppServerIntegrationModel();
+      const modelWithTools = model.bindTools([multiplyTool], { tool_choice: "multiply" });
+
+      try {
+        const response = await modelWithTools.invoke(
+          "Call the multiply tool with a = 6 and b = 7. Do not answer directly.",
+        );
+        const toolCall = response.tool_calls?.[0];
+
+        expect(toolCall).toBeDefined();
+        expect(toolCall?.name).toBe("multiply");
+        expect(toolCall?.args).toMatchObject({ a: 6, b: 7 });
+        expect(toolCall?.id).toEqual(expect.any(String));
+      } finally {
+        await model.close();
+      }
+    },
+    appServerIntegrationTimeoutMs,
+  );
+});
+
+const multiplyTool = tool(({ a, b }: { a: number; b: number }) => a * b, {
+  name: "multiply",
+  description: "Multiply two numbers.",
+  schema: z.object({
+    a: z.number(),
+    b: z.number(),
+  }),
 });
 
 function createAppServerIntegrationModel(): ChatCodexSDK {

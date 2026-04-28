@@ -385,6 +385,21 @@ class AppServerConnection {
       return;
     }
 
+    if (isDynamicToolRequestMethod(message.method)) {
+      const error = new Error(
+        "Codex App Server dynamic tools are not supported by ChatCodexSDK. Use ChatCodexSDK.bindTools() for LangChain-standard tool calls.",
+      );
+      this.transport.send({
+        id: message.id,
+        error: {
+          code: -32601,
+          message: error.message,
+        },
+      });
+      this.emitError(error);
+      return;
+    }
+
     this.transport.send({
       id: message.id,
       error: {
@@ -951,6 +966,10 @@ function isApprovalRequestMethod(method: string): boolean {
     method === "item/commandExecution/requestApproval" ||
     method === "item/fileChange/requestApproval"
   );
+}
+
+function isDynamicToolRequestMethod(method: string): boolean {
+  return method === "item/tool/call";
 }
 
 function approvalRequestKind(method: string): "command" | "file_change" {

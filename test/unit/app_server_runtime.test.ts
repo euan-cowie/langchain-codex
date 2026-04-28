@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { tool } from "@langchain/core/tools";
+import { z } from "zod";
 import { ChatCodexSDK } from "../../src/index.js";
 import { AppServerCodexClient, type AppServerTransport } from "../../src/app_server_runtime.js";
 
@@ -98,6 +100,48 @@ describe("AppServerCodexClient", () => {
 
     expect(text).toBe("Hello world");
     expect(threadId).toBe("thread-app");
+  });
+
+  it("uses prompt-mediated bindTools through App Server outputSchema", async () => {
+    const finalResponse = JSON.stringify({
+      type: "tool_calls",
+      content: "",
+      tool_calls: [{ id: "call-1", name: "multiply", args: { a: 6, b: 7 } }],
+    });
+    const transport = new FakeAppServerTransport({ finalResponse });
+    const client = new AppServerCodexClient({ transport });
+    const model = new ChatCodexSDK({
+      runtime: "app-server",
+      codexClient: client,
+    });
+    const modelWithTools = model.bindTools([multiplyTool]);
+
+    const response = await modelWithTools.invoke("What is 6 * 7?");
+    await model.close();
+
+    expect(response.tool_calls).toEqual([
+      {
+        type: "tool_call",
+        id: "call-1",
+        name: "multiply",
+        args: { a: 6, b: 7 },
+      },
+    ]);
+    const turnStart = transport.sent.find((message) => message.method === "turn/start");
+    expect(turnStart?.params).toMatchObject({
+      outputSchema: {
+        properties: {
+          tool_calls: {
+            description:
+              "Client-side LangChain tool calls to execute. Use this only when type is tool_calls.",
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(turnStart?.params)).toContain(
+      "Experimental LangChain tool-calling mode",
+    );
+    expect(JSON.stringify(turnStart?.params)).toContain("multiply");
   });
 
   it("routes command approval requests through the configured handler", async () => {
@@ -241,6 +285,39 @@ describe("AppServerCodexClient", () => {
       },
     ]);
   });
+
+  it("rejects App Server dynamic tool requests instead of treating them as LangChain tools", async () => {
+    const transport = new FakeAppServerTransport({
+      serverRequest: {
+        id: "dynamic-tool-1",
+        method: "item/tool/call",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          itemId: "tool-1",
+          tool: "multiply",
+          arguments: { a: 6, b: 7 },
+        },
+      },
+    });
+    const client = new AppServerCodexClient({ transport });
+
+    await expect(client.startThread().run("Use a dynamic tool.")).rejects.toThrow(
+      "App Server dynamic tools are not supported",
+    );
+    await client.close();
+
+    expect(transport.serverRequestResponses).toEqual([
+      {
+        id: "dynamic-tool-1",
+        error: {
+          code: -32601,
+          message:
+            "Codex App Server dynamic tools are not supported by ChatCodexSDK. Use ChatCodexSDK.bindTools() for LangChain-standard tool calls.",
+        },
+      },
+    ]);
+  });
 });
 
 type SentMessage = {
@@ -253,26 +330,33 @@ type SentMessage = {
 
 class FakeAppServerTransport implements AppServerTransport {
   readonly sent: SentMessage[] = [];
-  readonly approvalResponses: SentMessage[] = [];
+  readonly serverRequestResponses: SentMessage[] = [];
   private readonly queue = new MessageQueue<SentMessage>();
   readonly messages: AsyncIterable<SentMessage> = this.queue;
 
   constructor(
     private readonly options: {
       approvalRequest?: SentMessage & { id: number | string; method: string };
+      serverRequest?: SentMessage & { id: number | string; method: string };
+      finalResponse?: string;
     } = {},
   ) {}
+
+  get approvalResponses(): SentMessage[] {
+    return this.serverRequestResponses;
+  }
 
   send(message: unknown): void {
     const sent = message as SentMessage;
     this.sent.push(sent);
+    const serverRequest = this.options.serverRequest ?? this.options.approvalRequest;
 
     if (
-      this.options.approvalRequest !== undefined &&
-      sent.id === this.options.approvalRequest.id &&
+      serverRequest !== undefined &&
+      sent.id === serverRequest.id &&
       sent.method === undefined
     ) {
-      this.approvalResponses.push(sent);
+      this.serverRequestResponses.push(sent);
       if (sent.result !== undefined) {
         this.pushSuccessfulTurnEvents();
       }
@@ -316,8 +400,8 @@ class FakeAppServerTransport implements AppServerTransport {
             turn: { id: "turn-app" },
           },
         });
-        if (this.options.approvalRequest !== undefined) {
-          this.queue.push(this.options.approvalRequest);
+        if (serverRequest !== undefined) {
+          this.queue.push(serverRequest);
           return;
         }
         this.pushSuccessfulTurnEvents();
@@ -335,13 +419,15 @@ class FakeAppServerTransport implements AppServerTransport {
   }
 
   private pushSuccessfulTurnEvents(): void {
+    const finalResponse = this.options.finalResponse ?? "Hello world";
+    const midpoint = Math.ceil(finalResponse.length / 2);
     this.queue.push({
       method: "item/agentMessage/delta",
       params: {
         threadId: "thread-app",
         turnId: "turn-app",
         itemId: "msg-1",
-        delta: "Hello",
+        delta: finalResponse.slice(0, midpoint),
       },
     });
     this.queue.push({
@@ -350,7 +436,7 @@ class FakeAppServerTransport implements AppServerTransport {
         threadId: "thread-app",
         turnId: "turn-app",
         itemId: "msg-1",
-        delta: " world",
+        delta: finalResponse.slice(midpoint),
       },
     });
     this.queue.push({
@@ -361,7 +447,7 @@ class FakeAppServerTransport implements AppServerTransport {
         item: {
           id: "msg-1",
           type: "agentMessage",
-          text: "Hello world",
+          text: finalResponse,
         },
       },
     });
@@ -394,6 +480,15 @@ class FakeAppServerTransport implements AppServerTransport {
     });
   }
 }
+
+const multiplyTool = tool(({ a, b }: { a: number; b: number }) => a * b, {
+  name: "multiply",
+  description: "Multiply two numbers.",
+  schema: z.object({
+    a: z.number(),
+    b: z.number(),
+  }),
+});
 
 class MessageQueue<T> implements AsyncIterable<T> {
   private readonly values: T[] = [];

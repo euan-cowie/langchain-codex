@@ -235,8 +235,8 @@ console.log(result.parsed);
 
 ## Experimental Tool Calling
 
-`bindTools()` is available as an experimental LangChain compatibility layer. The Codex SDK does not
-currently expose a native JavaScript tool registration API, so this adapter uses Codex
+`bindTools()` is available as an experimental LangChain compatibility layer. The Codex local
+runtimes do not expose LangChain-standard JavaScript tool registration, so this adapter uses Codex
 `outputSchema` plus tool instructions to return LangChain `AIMessage.tool_calls`.
 
 There are three distinct tool surfaces:
@@ -249,7 +249,9 @@ There are three distinct tool surfaces:
 
 The `profile.toolCalling` and `profile.toolChoice` flags are `true` for the experimental
 LangChain-compatible `bindTools()` path. They should not be read as native Codex SDK tool
-registration support, and raw provider `tools` call options are still rejected.
+registration support, and raw provider `tools` call options are still rejected. The App Server
+runtime also has its own dynamic-tool protocol surface; `ChatCodexSDK` does not wire that surface to
+LangChain tools yet, and dynamic tool requests from App Server are rejected with a clear error.
 
 By default, bound-tool responses are treated as an unreliable protocol boundary. `ChatCodexSDK`
 asks Codex for a per-tool structured-output schema, validates the returned tool name and args, and
@@ -346,7 +348,7 @@ const graph = new StateGraph(MessagesAnnotation)
 ```
 
 This uses LangGraph to execute client-side LangChain tools. It does not turn those tools into native
-Codex runtime tools.
+Codex runtime tools or App Server dynamic tools.
 
 ## Model Profile
 
