@@ -328,14 +328,24 @@ class AppServerConnection {
         for await (const message of this.transport.messages) {
           await this.handleMessage(message as JsonRpcMessage);
         }
-      } catch (error) {
-        const normalized = error instanceof Error ? error : new Error(String(error));
-        for (const { reject } of this.pending.values()) {
-          reject(normalized);
+        if (!this.closed) {
+          this.failConnection(new Error("Codex app-server connection closed."));
         }
-        this.pending.clear();
+      } catch (error) {
+        if (!this.closed) {
+          const normalized = error instanceof Error ? error : new Error(String(error));
+          this.failConnection(normalized);
+        }
       }
     })();
+  }
+
+  private failConnection(error: Error): void {
+    for (const { reject } of this.pending.values()) {
+      reject(error);
+    }
+    this.pending.clear();
+    this.emitError(error);
   }
 
   private async handleMessage(message: JsonRpcMessage): Promise<void> {
@@ -769,7 +779,7 @@ function normalizeFileChange(
     return undefined;
   }
   const pathValue = getString(value, "path");
-  const kind = getString(value, "kind");
+  const kind = normalizeFileChangeKind(value.kind);
   if (
     pathValue === undefined ||
     (kind !== "add" && kind !== "delete" && kind !== "update")
@@ -777,6 +787,21 @@ function normalizeFileChange(
     return undefined;
   }
   return { path: pathValue, kind };
+}
+
+function normalizeFileChangeKind(value: unknown): "add" | "delete" | "update" | undefined {
+  if (value === "add" || value === "delete" || value === "update") {
+    return value;
+  }
+
+  if (isRecord(value)) {
+    const type = getString(value, "type");
+    if (type === "add" || type === "delete" || type === "update") {
+      return type;
+    }
+  }
+
+  return undefined;
 }
 
 function normalizeMcpResult(result: Record<string, unknown> | undefined) {
@@ -801,6 +826,9 @@ function normalizeCommandStatus(
 ): Extract<ThreadItem, { type: "command_execution" }>["status"] {
   if (status === "completed" || status === "failed") {
     return status;
+  }
+  if (status === "declined") {
+    return "failed";
   }
   return "in_progress";
 }

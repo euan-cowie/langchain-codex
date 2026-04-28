@@ -66,6 +66,7 @@
   },
   "dependencies": {
     "ajv": "^6.15.0",
+    "@openai/codex": "^0.125.0",
     "@openai/codex-sdk": "^0.125.0"
   },
   "devDependencies": {

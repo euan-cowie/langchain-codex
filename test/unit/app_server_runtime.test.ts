@@ -144,6 +144,73 @@ describe("AppServerCodexClient", () => {
     expect(JSON.stringify(turnStart?.params)).toContain("multiply");
   });
 
+  it("fails active turns when the app-server transport closes mid-turn", async () => {
+    const transport = new FakeAppServerTransport({ closeAfterTurnStarted: true });
+    const client = new AppServerCodexClient({ transport });
+
+    await expect(client.startThread().run("Wait forever.")).rejects.toThrow(
+      "Codex app-server connection closed.",
+    );
+    await client.close();
+  });
+
+  it("normalizes object-encoded file-change kinds", async () => {
+    const transport = new FakeAppServerTransport({
+      completedItems: [
+        {
+          id: "patch-1",
+          type: "fileChange",
+          status: "completed",
+          changes: [
+            {
+              path: "README.md",
+              kind: { type: "update", move_path: null },
+              diff: "@@",
+            },
+          ],
+        },
+      ],
+    });
+    const client = new AppServerCodexClient({ transport });
+
+    const result = await client.startThread().run("Edit README.");
+    await client.close();
+
+    expect(result.items).toContainEqual({
+      id: "patch-1",
+      type: "file_change",
+      status: "completed",
+      changes: [{ path: "README.md", kind: "update" }],
+    });
+  });
+
+  it("maps declined command approvals to a terminal failed command status", async () => {
+    const transport = new FakeAppServerTransport({
+      completedItems: [
+        {
+          id: "cmd-1",
+          type: "commandExecution",
+          command: "npm test",
+          status: "declined",
+          aggregatedOutput: "",
+          exitCode: null,
+        },
+      ],
+    });
+    const client = new AppServerCodexClient({ transport });
+
+    const result = await client.startThread().run("Run tests.");
+    await client.close();
+
+    expect(result.items).toContainEqual({
+      id: "cmd-1",
+      type: "command_execution",
+      command: "npm test",
+      aggregated_output: "",
+      status: "failed",
+    });
+  });
+
   it("routes command approval requests through the configured handler", async () => {
     const transport = new FakeAppServerTransport({
       approvalRequest: {
@@ -339,6 +406,8 @@ class FakeAppServerTransport implements AppServerTransport {
       approvalRequest?: SentMessage & { id: number | string; method: string };
       serverRequest?: SentMessage & { id: number | string; method: string };
       finalResponse?: string;
+      completedItems?: Array<Record<string, unknown>>;
+      closeAfterTurnStarted?: boolean;
     } = {},
   ) {}
 
@@ -400,6 +469,10 @@ class FakeAppServerTransport implements AppServerTransport {
             turn: { id: "turn-app" },
           },
         });
+        if (this.options.closeAfterTurnStarted === true) {
+          this.queue.close();
+          return;
+        }
         if (serverRequest !== undefined) {
           this.queue.push(serverRequest);
           return;
@@ -451,6 +524,16 @@ class FakeAppServerTransport implements AppServerTransport {
         },
       },
     });
+    for (const item of this.options.completedItems ?? []) {
+      this.queue.push({
+        method: "item/completed",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          item,
+        },
+      });
+    }
     this.queue.push({
       method: "thread/tokenUsage/updated",
       params: {
