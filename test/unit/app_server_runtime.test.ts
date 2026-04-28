@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -416,6 +416,41 @@ writeFileSync(${JSON.stringify(readyPath)}, "ready");
     }
   });
 
+  it("preserves nested empty codex config overrides for stdio App Server", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "langchain-codex-config-"));
+    const scriptPath = path.join(dir, "fake-codex.js");
+    const argvPath = path.join(dir, "argv.json");
+    await writeFile(
+      scriptPath,
+      `#!/usr/bin/env node
+const { writeFileSync } = require("node:fs");
+writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)));
+process.stdin.resume();
+`,
+    );
+    await chmod(scriptPath, 0o755);
+
+    try {
+      const client = new AppServerCodexClient({
+        codexPathOverride: scriptPath,
+        config: {
+          mcp_servers: {},
+          tools: {
+            local: {},
+          },
+        },
+      });
+      await waitUntil(() => existsSync(argvPath));
+      const args = JSON.parse(await readFile(argvPath, "utf8")) as string[];
+      await client.close();
+
+      expect(args).toContain("mcp_servers={}");
+      expect(args).toContain("tools.local={}");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("normalizes object-encoded file-change kinds", async () => {
     const transport = new FakeAppServerTransport({
       completedItems: [
@@ -555,6 +590,50 @@ writeFileSync(${JSON.stringify(readyPath)}, "ready");
     ]);
   });
 
+  it("routes legacy command approval requests through the configured handler", async () => {
+    const transport = new FakeAppServerTransport({
+      approvalRequest: {
+        id: "approval-command-legacy",
+        method: "execCommandApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          command: "npm test",
+        },
+      },
+    });
+    const approvals: Array<{ kind: string; method: string; params: unknown }> = [];
+    const client = new AppServerCodexClient({
+      transport,
+      approvalHandler: (request) => {
+        approvals.push(request);
+        return "accept";
+      },
+    });
+
+    const result = await client.startThread().run("Run tests.");
+    await client.close();
+
+    expect(result.finalResponse).toBe("Hello world");
+    expect(approvals).toEqual([
+      {
+        kind: "command",
+        method: "execCommandApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          command: "npm test",
+        },
+      },
+    ]);
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-command-legacy",
+        result: { decision: "accept" },
+      },
+    ]);
+  });
+
   it("uses the configured default decision for file-change approval requests", async () => {
     const transport = new FakeAppServerTransport({
       approvalRequest: {
@@ -580,6 +659,35 @@ writeFileSync(${JSON.stringify(readyPath)}, "ready");
     expect(transport.approvalResponses).toEqual([
       {
         id: "approval-file-1",
+        result: { decision: "cancel" },
+      },
+    ]);
+  });
+
+  it("uses the configured default decision for legacy file-change approval requests", async () => {
+    const transport = new FakeAppServerTransport({
+      approvalRequest: {
+        id: "approval-file-legacy",
+        method: "applyPatchApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          changes: [{ path: "README.md", kind: "update" }],
+        },
+      },
+    });
+    const client = new AppServerCodexClient({
+      transport,
+      defaultApprovalDecision: "cancel",
+    });
+
+    const result = await client.startThread().run("Edit README.");
+    await client.close();
+
+    expect(result.finalResponse).toBe("Hello world");
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-file-legacy",
         result: { decision: "cancel" },
       },
     ]);

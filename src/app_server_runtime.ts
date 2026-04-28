@@ -1128,7 +1128,9 @@ function isJsonRpcId(value: unknown): value is JsonRpcId {
 function isApprovalRequestMethod(method: string): boolean {
   return (
     method === "item/commandExecution/requestApproval" ||
-    method === "item/fileChange/requestApproval"
+    method === "item/fileChange/requestApproval" ||
+    method === "execCommandApproval" ||
+    method === "applyPatchApproval"
   );
 }
 
@@ -1137,7 +1139,9 @@ function isDynamicToolRequestMethod(method: string): boolean {
 }
 
 function approvalRequestKind(method: string): "command" | "file_change" {
-  return method === "item/commandExecution/requestApproval" ? "command" : "file_change";
+  return method === "item/commandExecution/requestApproval" || method === "execCommandApproval"
+    ? "command"
+    : "file_change";
 }
 
 function isApprovalDecision(value: unknown): value is CodexAppServerApprovalDecision {
@@ -1216,11 +1220,19 @@ function flattenConfigOverrides(value: unknown, prefix: string, overrides: strin
     }
     const childPath = prefix.length > 0 ? `${prefix}.${key}` : key;
     if (isPlainObject(child)) {
-      flattenConfigOverrides(child, childPath, overrides);
+      if (hasDefinedConfigChildren(child)) {
+        flattenConfigOverrides(child, childPath, overrides);
+      } else {
+        overrides.push(`${childPath}={}`);
+      }
     } else {
       overrides.push(`${childPath}=${toTomlValue(child, childPath)}`);
     }
   }
+}
+
+function hasDefinedConfigChildren(value: Record<string, unknown>): boolean {
+  return Object.values(value).some((child) => child !== undefined);
 }
 
 function toTomlValue(value: unknown, keyPath: string): string {
