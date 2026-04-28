@@ -15,6 +15,7 @@ describe("AppServerCodexClient", () => {
       approvalPolicy: "never",
       modelReasoningEffort: "high",
       networkAccessEnabled: true,
+      additionalDirectories: ["/shared", "/tools"],
       webSearchMode: "live",
     });
 
@@ -59,7 +60,10 @@ describe("AppServerCodexClient", () => {
       approvalPolicy: "never",
       sandbox: "workspace-write",
       config: {
-        sandbox_workspace_write: { network_access: true },
+        sandbox_workspace_write: {
+          network_access: true,
+          writable_roots: ["/shared", "/tools"],
+        },
         web_search: "live",
       },
     });
@@ -100,6 +104,23 @@ describe("AppServerCodexClient", () => {
 
     expect(text).toBe("Hello world");
     expect(threadId).toBe("thread-app");
+  });
+
+  it("does not route events to runs before their App Server thread id is known", async () => {
+    const transport = new InterleavedThreadStartTransport();
+    const client = new AppServerCodexClient({ transport });
+
+    const [first, second] = await withTimeout(
+      Promise.all([
+        client.startThread().run("First prompt."),
+        client.startThread().run("Second prompt."),
+      ]),
+      5_000,
+    );
+    await client.close();
+
+    expect(first.finalResponse).toBe("first response");
+    expect(second.finalResponse).toBe("second response");
   });
 
   it("uses prompt-mediated bindTools through App Server outputSchema", async () => {
@@ -183,6 +204,7 @@ describe("AppServerCodexClient", () => {
       sandboxMode: "workspace-write",
       approvalPolicy: "never",
       networkAccessEnabled: true,
+      additionalDirectories: ["/shared"],
       webSearchMode: "live",
     });
 
@@ -197,9 +219,13 @@ describe("AppServerCodexClient", () => {
       approvalPolicy: "never",
       sandbox: "workspace-write",
       config: {
-        sandbox_workspace_write: { network_access: true },
+        sandbox_workspace_write: {
+          network_access: true,
+          writable_roots: ["/shared"],
+        },
         web_search: "live",
       },
+      persistExtendedHistory: true,
     });
   });
 
@@ -458,6 +484,8 @@ type SentMessage = {
   error?: unknown;
 };
 
+type SentRequest = SentMessage & { id: number | string; method: string };
+
 class FakeAppServerTransport implements AppServerTransport {
   readonly sent: SentMessage[] = [];
   readonly serverRequestResponses: SentMessage[] = [];
@@ -661,6 +689,122 @@ class FakeAppServerTransport implements AppServerTransport {
         threadId: this.threadId,
         turn: {
           id: "turn-app",
+          status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+    });
+  }
+}
+
+class InterleavedThreadStartTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  private readonly queue = new MessageQueue<SentMessage>();
+  private readonly pendingThreadStarts: SentRequest[] = [];
+  readonly messages: AsyncIterable<SentMessage> = this.queue;
+
+  send(message: unknown): void {
+    const sent = message as SentMessage;
+    this.sent.push(sent);
+
+    if (sent.id === undefined || sent.method === undefined) {
+      return;
+    }
+    const request = sent as SentRequest;
+
+    switch (request.method) {
+      case "initialize":
+        this.queue.push({ id: request.id, result: { userAgent: "fake" } });
+        return;
+      case "thread/start":
+        this.pendingThreadStarts.push(request);
+        if (this.pendingThreadStarts.length === 2) {
+          const first = this.pendingThreadStarts[0];
+          if (first === undefined) {
+            return;
+          }
+          this.queue.push({
+            id: first.id,
+            result: {
+              thread: {
+                id: "thread-1",
+              },
+            },
+          });
+        }
+        return;
+      case "turn/start": {
+        const threadId = getSentString(sent.params, "threadId") ?? "thread-unknown";
+        const turnId = threadId === "thread-1" ? "turn-1" : "turn-2";
+        const response = threadId === "thread-1" ? "first response" : "second response";
+        this.queue.push({
+          id: request.id,
+          result: {
+            turn: {
+              id: turnId,
+              status: "inProgress",
+              items: [],
+              error: null,
+            },
+          },
+        });
+        this.pushSuccessfulTurnEvents(threadId, turnId, response);
+        if (threadId === "thread-1") {
+          const second = this.pendingThreadStarts[1];
+          if (second !== undefined) {
+            this.queue.push({
+              id: second.id,
+              result: {
+                thread: {
+                  id: "thread-2",
+                },
+              },
+            });
+          }
+        }
+        return;
+      }
+      default:
+        this.queue.push({
+          id: request.id,
+          error: { message: `Unexpected request: ${request.method}` },
+        });
+    }
+  }
+
+  close(): void {
+    this.queue.close();
+  }
+
+  private pushSuccessfulTurnEvents(threadId: string, turnId: string, finalResponse: string): void {
+    this.queue.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId,
+        turnId,
+        itemId: `msg-${turnId}`,
+        delta: finalResponse,
+      },
+    });
+    this.queue.push({
+      method: "item/completed",
+      params: {
+        threadId,
+        turnId,
+        item: {
+          id: `msg-${turnId}`,
+          type: "agentMessage",
+          text: finalResponse,
+        },
+      },
+    });
+    this.queue.push({
+      method: "turn/completed",
+      params: {
+        threadId,
+        turn: {
+          id: turnId,
           status: "completed",
           items: [],
           error: null,

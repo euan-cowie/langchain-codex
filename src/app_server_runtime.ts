@@ -143,23 +143,25 @@ class AppServerThread implements CodexThreadLike {
       usage: null,
       itemsById: new Map(),
     };
-    const unsubscribe = this.connection.subscribe((message) =>
-      handleTurnNotification(message, state, queue),
-    );
 
     let abortListener: (() => void) | undefined;
+    let unsubscribe: (() => void) | undefined;
 
     try {
       const wasNewThread = this._id === null;
       await this.ensureThread();
-      state.threadId = this._id;
-
-      if (wasNewThread && this._id !== null) {
-        queue.push({ type: "thread.started", thread_id: this._id });
-      }
 
       if (this._id === null) {
         throw new Error("Codex app-server did not return a thread id.");
+      }
+
+      state.threadId = this._id;
+      unsubscribe = this.connection.subscribe((message) =>
+        handleTurnNotification(message, state, queue),
+      );
+
+      if (wasNewThread) {
+        queue.push({ type: "thread.started", thread_id: this._id });
       }
 
       const startTurn = await this.connection.request("turn/start", {
@@ -183,7 +185,7 @@ class AppServerThread implements CodexThreadLike {
       }
     } finally {
       abortListener?.();
-      unsubscribe();
+      unsubscribe?.();
     }
   }
 
@@ -891,6 +893,7 @@ function threadResumeParams(options: ThreadOptions): Record<string, unknown> {
     approvalPolicy: options.approvalPolicy ?? null,
     sandbox: options.sandboxMode ?? null,
     config: threadConfig(options),
+    persistExtendedHistory: true,
   };
 }
 
@@ -905,8 +908,15 @@ function turnOverrideParams(options: ThreadOptions): Record<string, unknown> {
 
 function threadConfig(options: ThreadOptions): Record<string, unknown> | null {
   const config: Record<string, unknown> = {};
+  const sandboxWorkspaceWrite: Record<string, unknown> = {};
   if (options.networkAccessEnabled !== undefined) {
-    config.sandbox_workspace_write = { network_access: options.networkAccessEnabled };
+    sandboxWorkspaceWrite.network_access = options.networkAccessEnabled;
+  }
+  if (options.additionalDirectories !== undefined) {
+    sandboxWorkspaceWrite.writable_roots = options.additionalDirectories;
+  }
+  if (Object.keys(sandboxWorkspaceWrite).length > 0) {
+    config.sandbox_workspace_write = sandboxWorkspaceWrite;
   }
   if (options.webSearchMode !== undefined) {
     config.web_search = options.webSearchMode;
