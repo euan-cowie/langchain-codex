@@ -260,8 +260,16 @@ Initial implementation slice completed:
 
 Remaining before default flip:
 
-- Add real App Server integration tests behind an opt-in environment variable.
+- Run and harden the real App Server integration tests behind
+  `CODEX_APP_SERVER_INTEGRATION=1`.
 - Expand approval handling tests and document human-in-the-loop patterns.
 - Validate resume, cancellation, structured output, and runtime content blocks
   against a live `codex app-server` process.
 - Decide whether and when to deprecate the SDK runtime.
+
+Phase 3 follow-up slice added:
+
+- Added an opt-in live App Server integration suite for `invoke()`, `stream()`,
+  `streamEvents()`, explicit `threadId` resume, and `withStructuredOutput()`.
+- Updated the App Server handshake to declare `experimentalApi` capability before
+  requesting extended persisted history.

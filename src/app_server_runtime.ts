@@ -290,8 +290,11 @@ class AppServerConnection {
           title: "langchain-codex",
           version: "0.1.0",
         },
+        capabilities: {
+          experimentalApi: true,
+        },
       });
-      this.transport.send({ method: "initialized", params: {} });
+      this.transport.send({ method: "initialized" });
     })();
 
     return this.initialized;

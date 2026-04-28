@@ -557,6 +557,15 @@ Integration tests are opt-in because they require local Codex auth:
 RUN_CODEX_INTEGRATION_TESTS=1 npm run test:integration
 ```
 
+The experimental App Server runtime has a separate opt-in suite:
+
+```bash
+CODEX_APP_SERVER_INTEGRATION=1 npm run test:integration:app-server
+```
+
+Set `CODEX_APP_SERVER_INTEGRATION_MODEL` or `CODEX_INTEGRATION_MODEL` to override the default
+model, and `CODEX_APP_SERVER_INTEGRATION_TIMEOUT_MS` for slower local runs.
+
 ## Version Compatibility
 
 This package targets:

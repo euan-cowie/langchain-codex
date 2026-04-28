@@ -40,6 +40,16 @@ describe("AppServerCodexClient", () => {
       "turn/start",
     ]);
 
+    const initialize = transport.sent.find((message) => message.method === "initialize");
+    expect(initialize?.params).toMatchObject({
+      capabilities: {
+        experimentalApi: true,
+      },
+    });
+
+    const initialized = transport.sent.find((message) => message.method === "initialized");
+    expect(initialized?.params).toBeUndefined();
+
     const threadStart = transport.sent.find((message) => message.method === "thread/start");
     expect(threadStart?.params).toMatchObject({
       model: "gpt-5.4",
