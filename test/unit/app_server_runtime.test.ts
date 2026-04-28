@@ -123,6 +123,30 @@ describe("AppServerCodexClient", () => {
     expect(second.finalResponse).toBe("second response");
   });
 
+  it("routes server-request errors only to the owning App Server turn", async () => {
+    const transport = new ConcurrentServerRequestErrorTransport();
+    const client = new AppServerCodexClient({ transport });
+
+    const [first, second] = await withTimeout(
+      Promise.allSettled([
+        client.startThread().run("Use an unsupported dynamic tool."),
+        client.startThread().run("Keep running independently."),
+      ]),
+      5_000,
+    );
+    await client.close();
+
+    expect(first.status).toBe("rejected");
+    if (first.status === "rejected") {
+      expect(first.reason).toBeInstanceOf(Error);
+      expect((first.reason as Error).message).toContain("dynamic tools are not supported");
+    }
+    expect(second.status).toBe("fulfilled");
+    if (second.status === "fulfilled") {
+      expect(second.value.finalResponse).toBe("second response");
+    }
+  });
+
   it("uses prompt-mediated bindTools through App Server outputSchema", async () => {
     const finalResponse = JSON.stringify({
       type: "tool_calls",
@@ -172,6 +196,61 @@ describe("AppServerCodexClient", () => {
     await expect(client.startThread().run("Wait forever.")).rejects.toThrow(
       "Codex app-server connection closed.",
     );
+    await client.close();
+  });
+
+  it("interrupts App Server turns when streamed events are cancelled", async () => {
+    const transport = new FakeAppServerTransport({ holdAfterTurnStarted: true });
+    const client = new AppServerCodexClient({ transport });
+    const streamed = await client.startThread().runStreamed("Stream until cancelled.");
+    const iterator = streamed.events[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: "thread.started" },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: "turn.started" },
+    });
+    await iterator.return?.(undefined);
+    await waitUntil(() => transport.sent.some((message) => message.method === "turn/interrupt"));
+    await client.close();
+
+    const interrupt = transport.sent.find((message) => message.method === "turn/interrupt");
+    expect(interrupt?.params).toMatchObject({
+      threadId: "thread-app",
+      turnId: "turn-app",
+    });
+  });
+
+  it("fails active turns when the App Server client closes mid-turn", async () => {
+    const transport = new FakeAppServerTransport({ holdAfterTurnStarted: true });
+    const client = new AppServerCodexClient({ transport });
+
+    const run = client.startThread().run("Wait for close.");
+    await waitUntil(() => transport.sent.some((message) => message.method === "turn/start"));
+    await client.close();
+
+    await expect(withTimeout(run, 5_000)).rejects.toThrow(
+      "Codex app-server connection closed.",
+    );
+  });
+
+  it("handles rejected turn interrupts during abort", async () => {
+    const transport = new FakeAppServerTransport({
+      holdAfterTurnStarted: true,
+      rejectInterrupt: true,
+    });
+    const client = new AppServerCodexClient({ transport });
+    const controller = new AbortController();
+
+    const run = client.startThread().run("Wait for abort.", { signal: controller.signal });
+    await waitUntil(() => transport.sent.some((message) => message.method === "turn/start"));
+    controller.abort(new Error("deadline exceeded"));
+
+    await expect(withTimeout(run, 5_000)).rejects.toThrow("deadline exceeded");
+    await waitUntil(() => transport.sent.some((message) => message.method === "turn/interrupt"));
     await client.close();
   });
 
@@ -500,6 +579,8 @@ class FakeAppServerTransport implements AppServerTransport {
       finalResponse?: string;
       completedItems?: Array<Record<string, unknown>>;
       closeAfterTurnStarted?: boolean;
+      holdAfterTurnStarted?: boolean;
+      rejectInterrupt?: boolean;
       retryErrorBeforeSuccess?: boolean;
       fatalErrorBeforeSuccess?: boolean;
     } = {},
@@ -580,6 +661,9 @@ class FakeAppServerTransport implements AppServerTransport {
           this.queue.close();
           return;
         }
+        if (this.options.holdAfterTurnStarted === true) {
+          return;
+        }
         if (serverRequest !== undefined) {
           this.queue.push(serverRequest);
           return;
@@ -612,6 +696,13 @@ class FakeAppServerTransport implements AppServerTransport {
           return;
         }
         this.pushSuccessfulTurnEvents();
+        return;
+      case "turn/interrupt":
+        this.queue.push(
+          this.options.rejectInterrupt === true
+            ? { id: sent.id, error: { message: "interrupt rejected" } }
+            : { id: sent.id, result: {} },
+        );
         return;
       default:
         this.queue.push({
@@ -814,6 +905,146 @@ class InterleavedThreadStartTransport implements AppServerTransport {
   }
 }
 
+class ConcurrentServerRequestErrorTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  readonly serverRequestResponses: SentMessage[] = [];
+  private readonly queue = new MessageQueue<SentMessage>();
+  private threadStartCount = 0;
+  private firstTurnStarted = false;
+  private secondTurnStarted = false;
+  private toolRequestSent = false;
+  readonly messages: AsyncIterable<SentMessage> = this.queue;
+
+  send(message: unknown): void {
+    const sent = message as SentMessage;
+    this.sent.push(sent);
+
+    if (sent.id === "dynamic-tool-1" && sent.method === undefined) {
+      this.serverRequestResponses.push(sent);
+      this.pushSuccessfulTurnEvents("thread-2", "turn-2", "second response");
+      return;
+    }
+
+    if (sent.id === undefined || sent.method === undefined) {
+      return;
+    }
+    const request = sent as SentRequest;
+
+    switch (request.method) {
+      case "initialize":
+        this.queue.push({ id: request.id, result: { userAgent: "fake" } });
+        return;
+      case "thread/start": {
+        this.threadStartCount += 1;
+        this.queue.push({
+          id: request.id,
+          result: {
+            thread: {
+              id: `thread-${this.threadStartCount}`,
+            },
+          },
+        });
+        return;
+      }
+      case "turn/start": {
+        const threadId = getSentString(sent.params, "threadId") ?? "thread-unknown";
+        const turnId = threadId === "thread-1" ? "turn-1" : "turn-2";
+        this.queue.push({
+          id: request.id,
+          result: {
+            turn: {
+              id: turnId,
+              status: "inProgress",
+              items: [],
+              error: null,
+            },
+          },
+        });
+        this.queue.push({
+          method: "turn/started",
+          params: {
+            threadId,
+            turn: { id: turnId },
+          },
+        });
+        if (threadId === "thread-1") {
+          this.firstTurnStarted = true;
+        } else if (threadId === "thread-2") {
+          this.secondTurnStarted = true;
+        }
+        this.pushToolRequestWhenBothTurnsStarted();
+        return;
+      }
+      case "turn/interrupt":
+        this.queue.push({ id: request.id, result: {} });
+        return;
+      default:
+        this.queue.push({
+          id: request.id,
+          error: { message: `Unexpected request: ${request.method}` },
+        });
+    }
+  }
+
+  close(): void {
+    this.queue.close();
+  }
+
+  private pushToolRequestWhenBothTurnsStarted(): void {
+    if (!this.firstTurnStarted || !this.secondTurnStarted || this.toolRequestSent) {
+      return;
+    }
+    this.toolRequestSent = true;
+    this.queue.push({
+      id: "dynamic-tool-1",
+      method: "item/tool/call",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "tool-1",
+        tool: "multiply",
+        arguments: { a: 6, b: 7 },
+      },
+    });
+  }
+
+  private pushSuccessfulTurnEvents(threadId: string, turnId: string, finalResponse: string): void {
+    this.queue.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId,
+        turnId,
+        itemId: `msg-${turnId}`,
+        delta: finalResponse,
+      },
+    });
+    this.queue.push({
+      method: "item/completed",
+      params: {
+        threadId,
+        turnId,
+        item: {
+          id: `msg-${turnId}`,
+          type: "agentMessage",
+          text: finalResponse,
+        },
+      },
+    });
+    this.queue.push({
+      method: "turn/completed",
+      params: {
+        threadId,
+        turn: {
+          id: turnId,
+          status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+    });
+  }
+}
+
 const multiplyTool = tool(({ a, b }: { a: number; b: number }) => a * b, {
   name: "multiply",
   description: "Multiply two numbers.",
@@ -834,6 +1065,16 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       clearTimeout(timeout);
     }
   });
+}
+
+async function waitUntil(predicate: () => boolean, ms = 5_000): Promise<void> {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > ms) {
+      throw new Error(`Timed out after ${ms}ms.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 function getSentString(value: unknown, key: string): string | undefined {

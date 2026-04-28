@@ -146,6 +146,22 @@ class AppServerThread implements CodexThreadLike {
 
     let abortListener: (() => void) | undefined;
     let unsubscribe: (() => void) | undefined;
+    let turnId: string | null = null;
+    let turnFinished = false;
+    let interruptSent = false;
+
+    const interruptActiveTurn = () => {
+      if (this._id === null || turnId === null || turnFinished || interruptSent) {
+        return;
+      }
+      interruptSent = true;
+      void this.connection
+        .request("turn/interrupt", {
+          threadId: this._id,
+          turnId,
+        })
+        .catch(() => undefined);
+    };
 
     try {
       const wasNewThread = this._id === null;
@@ -171,19 +187,24 @@ class AppServerThread implements CodexThreadLike {
         ...turnOverrideParams(this.threadOptions),
       });
       const turn = getRecord(startTurn, "turn");
-      const turnId = getString(turn, "id");
-      if (turnId === undefined) {
+      const turnIdValue = getString(turn, "id");
+      if (turnIdValue === undefined) {
         throw new Error("Codex app-server did not return a turn id.");
       }
+      turnId = turnIdValue;
       state.turnId = turnId;
 
-      abortListener = this.attachAbortListener(turnOptions.signal, turnId, queue);
+      abortListener = this.attachAbortListener(turnOptions.signal, queue, interruptActiveTurn);
 
       for await (const event of queue) {
+        if (isTerminalTurnEvent(event)) {
+          turnFinished = true;
+        }
         turnOptions.signal?.throwIfAborted();
         yield event;
       }
     } finally {
+      interruptActiveTurn();
       abortListener?.();
       unsubscribe?.();
     }
@@ -214,18 +235,15 @@ class AppServerThread implements CodexThreadLike {
 
   private attachAbortListener(
     signal: AbortSignal | undefined,
-    turnId: string,
     queue: AsyncQueue<ThreadEvent>,
+    interruptActiveTurn: () => void,
   ): (() => void) | undefined {
-    if (signal === undefined || this._id === null) {
+    if (signal === undefined) {
       return undefined;
     }
 
     const abort = () => {
-      void this.connection.request("turn/interrupt", {
-        threadId: this._id,
-        turnId,
-      });
+      interruptActiveTurn();
       queue.fail(signal.reason instanceof Error ? signal.reason : new Error("Codex turn aborted."));
     };
 
@@ -264,7 +282,13 @@ class AppServerConnection {
   }
 
   async request(method: string, params?: unknown): Promise<unknown> {
+    if (this.closed) {
+      throw new Error("Codex app-server connection closed.");
+    }
     await this.ensureInitialized();
+    if (this.closed) {
+      throw new Error("Codex app-server connection closed.");
+    }
     return this.sendRequest(method, params);
   }
 
@@ -273,11 +297,8 @@ class AppServerConnection {
       return;
     }
     this.closed = true;
+    this.failConnection(new Error("Codex app-server connection closed."));
     await this.transport.close();
-    for (const { reject } of this.pending.values()) {
-      reject(new Error("Codex app-server connection closed."));
-    }
-    this.pending.clear();
   }
 
   private ensureInitialized(): Promise<void> {
@@ -392,7 +413,7 @@ class AppServerConnection {
             message: normalized.message,
           },
         });
-        this.emitError(normalized);
+        this.emitError(normalized, message.params);
       }
       return;
     }
@@ -408,7 +429,7 @@ class AppServerConnection {
           message: error.message,
         },
       });
-      this.emitError(error);
+      this.emitError(error, message.params);
       return;
     }
 
@@ -444,10 +465,24 @@ class AppServerConnection {
     return decision;
   }
 
-  private emitError(error: Error): void {
+  private emitError(error: Error, routingParams?: unknown): void {
+    const params: Record<string, unknown> = {
+      message: error.message,
+      error: { message: error.message },
+    };
+    const routing = getRecord(routingParams);
+    const threadId = getString(routing, "threadId");
+    const turnId = getString(routing, "turnId");
+    if (threadId !== undefined) {
+      params.threadId = threadId;
+    }
+    if (turnId !== undefined) {
+      params.turnId = turnId;
+    }
+
     const message: JsonRpcNotification = {
       method: "error",
-      params: { message: error.message },
+      params,
     };
 
     for (const handler of this.notificationHandlers) {
@@ -696,6 +731,12 @@ function emitTurnCompleted(
     },
   });
   queue.close();
+}
+
+function isTerminalTurnEvent(event: ThreadEvent): boolean {
+  return (
+    event.type === "turn.completed" || event.type === "turn.failed" || event.type === "error"
+  );
 }
 
 function normalizeAppServerItem(item: Record<string, unknown> | undefined): ThreadItem | undefined {
