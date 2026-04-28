@@ -147,6 +147,29 @@ describe("AppServerCodexClient", () => {
     }
   });
 
+  it("continues draining messages while approval handlers are pending", async () => {
+    const approval = createDeferred<"accept">();
+    const transport = new SlowApprovalTransport();
+    const client = new AppServerCodexClient({
+      transport,
+      approvalHandler: () => approval.promise,
+    });
+
+    const first = client.startThread().run("Needs approval.");
+    const second = client.startThread().run("Should finish independently.");
+
+    await expect(withTimeout(second, 5_000)).resolves.toMatchObject({
+      finalResponse: "second response",
+    });
+    expect(transport.approvalResponses).toEqual([]);
+
+    approval.resolve("accept");
+    await expect(withTimeout(first, 5_000)).resolves.toMatchObject({
+      finalResponse: "first response",
+    });
+    await client.close();
+  });
+
   it("uses prompt-mediated bindTools through App Server outputSchema", async () => {
     const finalResponse = JSON.stringify({
       type: "tool_calls",
@@ -194,6 +217,9 @@ describe("AppServerCodexClient", () => {
     const client = new AppServerCodexClient({ transport });
 
     await expect(client.startThread().run("Wait forever.")).rejects.toThrow(
+      "Codex app-server connection closed.",
+    );
+    await expect(withTimeout(client.startThread().run("Try again."), 5_000)).rejects.toThrow(
       "Codex app-server connection closed.",
     );
     await client.close();
@@ -1045,6 +1071,133 @@ class ConcurrentServerRequestErrorTransport implements AppServerTransport {
   }
 }
 
+class SlowApprovalTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  readonly approvalResponses: SentMessage[] = [];
+  private readonly queue = new MessageQueue<SentMessage>();
+  private threadStartCount = 0;
+  readonly messages: AsyncIterable<SentMessage> = this.queue;
+
+  send(message: unknown): void {
+    const sent = message as SentMessage;
+    this.sent.push(sent);
+
+    if (sent.id === "approval-1" && sent.method === undefined) {
+      this.approvalResponses.push(sent);
+      this.pushSuccessfulTurnEvents("thread-1", "turn-1", "first response");
+      return;
+    }
+
+    if (sent.id === undefined || sent.method === undefined) {
+      return;
+    }
+    const request = sent as SentRequest;
+
+    switch (request.method) {
+      case "initialize":
+        this.queue.push({ id: request.id, result: { userAgent: "fake" } });
+        return;
+      case "thread/start": {
+        this.threadStartCount += 1;
+        this.queue.push({
+          id: request.id,
+          result: {
+            thread: {
+              id: `thread-${this.threadStartCount}`,
+            },
+          },
+        });
+        return;
+      }
+      case "turn/start": {
+        const threadId = getSentString(sent.params, "threadId") ?? "thread-unknown";
+        const turnId = threadId === "thread-1" ? "turn-1" : "turn-2";
+        this.queue.push({
+          id: request.id,
+          result: {
+            turn: {
+              id: turnId,
+              status: "inProgress",
+              items: [],
+              error: null,
+            },
+          },
+        });
+        this.queue.push({
+          method: "turn/started",
+          params: {
+            threadId,
+            turn: { id: turnId },
+          },
+        });
+        if (threadId === "thread-1") {
+          this.queue.push({
+            id: "approval-1",
+            method: "item/commandExecution/requestApproval",
+            params: {
+              threadId,
+              turnId,
+              itemId: "cmd-1",
+              command: "npm test",
+            },
+          });
+          return;
+        }
+        this.pushSuccessfulTurnEvents(threadId, turnId, "second response");
+        return;
+      }
+      case "turn/interrupt":
+        this.queue.push({ id: request.id, result: {} });
+        return;
+      default:
+        this.queue.push({
+          id: request.id,
+          error: { message: `Unexpected request: ${request.method}` },
+        });
+    }
+  }
+
+  close(): void {
+    this.queue.close();
+  }
+
+  private pushSuccessfulTurnEvents(threadId: string, turnId: string, finalResponse: string): void {
+    this.queue.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId,
+        turnId,
+        itemId: `msg-${turnId}`,
+        delta: finalResponse,
+      },
+    });
+    this.queue.push({
+      method: "item/completed",
+      params: {
+        threadId,
+        turnId,
+        item: {
+          id: `msg-${turnId}`,
+          type: "agentMessage",
+          text: finalResponse,
+        },
+      },
+    });
+    this.queue.push({
+      method: "turn/completed",
+      params: {
+        threadId,
+        turn: {
+          id: turnId,
+          status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+    });
+  }
+}
+
 const multiplyTool = tool(({ a, b }: { a: number; b: number }) => a * b, {
   name: "multiply",
   description: "Multiply two numbers.",
@@ -1065,6 +1218,20 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       clearTimeout(timeout);
     }
   });
+}
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+} {
+  let resolve: (value: T) => void = () => undefined;
+  let reject: (error: Error) => void = () => undefined;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }
 
 async function waitUntil(predicate: () => boolean, ms = 5_000): Promise<void> {

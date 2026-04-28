@@ -296,7 +296,6 @@ class AppServerConnection {
     if (this.closed) {
       return;
     }
-    this.closed = true;
     this.failConnection(new Error("Codex app-server connection closed."));
     await this.transport.close();
   }
@@ -325,6 +324,9 @@ class AppServerConnection {
   }
 
   private sendRequest(method: string, params?: unknown): Promise<unknown> {
+    if (this.closed) {
+      return Promise.reject(new Error("Codex app-server connection closed."));
+    }
     const id = this.nextId;
     this.nextId += 1;
     const message = params === undefined ? { method, id } : { method, id, params };
@@ -349,7 +351,7 @@ class AppServerConnection {
     void (async () => {
       try {
         for await (const message of this.transport.messages) {
-          await this.handleMessage(message as JsonRpcMessage);
+          this.handleMessage(message as JsonRpcMessage);
         }
         if (!this.closed) {
           this.failConnection(new Error("Codex app-server connection closed."));
@@ -364,6 +366,7 @@ class AppServerConnection {
   }
 
   private failConnection(error: Error): void {
+    this.closed = true;
     for (const { reject } of this.pending.values()) {
       reject(error);
     }
@@ -371,9 +374,12 @@ class AppServerConnection {
     this.emitError(error);
   }
 
-  private async handleMessage(message: JsonRpcMessage): Promise<void> {
+  private handleMessage(message: JsonRpcMessage): void {
     if (isServerRequest(message)) {
-      await this.handleServerRequest(message);
+      void this.handleServerRequest(message).catch((error) => {
+        const normalized = error instanceof Error ? error : new Error(String(error));
+        this.emitError(normalized, message.params);
+      });
       return;
     }
 
