@@ -629,7 +629,7 @@ process.stdin.resume();
     expect(transport.approvalResponses).toEqual([
       {
         id: "approval-command-legacy",
-        result: { decision: "accept" },
+        result: { decision: "approved" },
       },
     ]);
   });
@@ -688,9 +688,37 @@ process.stdin.resume();
     expect(transport.approvalResponses).toEqual([
       {
         id: "approval-file-legacy",
-        result: { decision: "cancel" },
+        result: { decision: "abort" },
       },
     ]);
+  });
+
+  it("does not broadcast unrouted legacy approval errors to unrelated turns", async () => {
+    const transport = new LegacyApprovalErrorRoutingTransport();
+    const client = new AppServerCodexClient({ transport });
+
+    const first = client.startThread().run("Needs legacy approval.");
+    const second = client.startThread().run("Should not fail.");
+
+    await waitUntil(() => transport.approvalResponses.length === 1);
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-legacy-1",
+        error: {
+          code: -32000,
+          message:
+            "Codex app-server requested command approval, but no appServerApprovalHandler is configured.",
+        },
+      },
+    ]);
+
+    transport.completeSecond();
+    await expect(withTimeout(second, 5_000)).resolves.toMatchObject({
+      finalResponse: "second response",
+    });
+
+    await client.close();
+    await expect(first).rejects.toThrow("Codex app-server connection closed.");
   });
 
   it("fails clearly when an approval request has no handler", async () => {
@@ -1338,6 +1366,147 @@ class ConcurrentServerRequestErrorTransport implements AppServerTransport {
         itemId: "tool-1",
         tool: "multiply",
         arguments: { a: 6, b: 7 },
+      },
+    });
+  }
+
+  private pushSuccessfulTurnEvents(threadId: string, turnId: string, finalResponse: string): void {
+    this.queue.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId,
+        turnId,
+        itemId: `msg-${turnId}`,
+        delta: finalResponse,
+      },
+    });
+    this.queue.push({
+      method: "item/completed",
+      params: {
+        threadId,
+        turnId,
+        item: {
+          id: `msg-${turnId}`,
+          type: "agentMessage",
+          text: finalResponse,
+        },
+      },
+    });
+    this.queue.push({
+      method: "turn/completed",
+      params: {
+        threadId,
+        turn: {
+          id: turnId,
+          status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+    });
+  }
+}
+
+class LegacyApprovalErrorRoutingTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  readonly approvalResponses: SentMessage[] = [];
+  private readonly queue = new MessageQueue<SentMessage>();
+  private threadStartCount = 0;
+  private firstTurnStarted = false;
+  private secondTurnStarted = false;
+  private approvalSent = false;
+  readonly messages: AsyncIterable<SentMessage> = this.queue;
+
+  send(message: unknown): void {
+    const sent = message as SentMessage;
+    this.sent.push(sent);
+
+    if (sent.id === "approval-legacy-1" && sent.method === undefined) {
+      this.approvalResponses.push(sent);
+      return;
+    }
+
+    if (sent.id === undefined || sent.method === undefined) {
+      return;
+    }
+    const request = sent as SentRequest;
+
+    switch (request.method) {
+      case "initialize":
+        this.queue.push({ id: request.id, result: { userAgent: "fake" } });
+        return;
+      case "thread/start": {
+        this.threadStartCount += 1;
+        this.queue.push({
+          id: request.id,
+          result: {
+            thread: {
+              id: `thread-${this.threadStartCount}`,
+            },
+          },
+        });
+        return;
+      }
+      case "turn/start": {
+        const threadId = getSentString(sent.params, "threadId") ?? "thread-unknown";
+        const turnId = threadId === "thread-1" ? "turn-1" : "turn-2";
+        this.queue.push({
+          id: request.id,
+          result: {
+            turn: {
+              id: turnId,
+              status: "inProgress",
+              items: [],
+              error: null,
+            },
+          },
+        });
+        this.queue.push({
+          method: "turn/started",
+          params: {
+            threadId,
+            turn: { id: turnId },
+          },
+        });
+        if (threadId === "thread-1") {
+          this.firstTurnStarted = true;
+        } else if (threadId === "thread-2") {
+          this.secondTurnStarted = true;
+        }
+        this.pushLegacyApprovalWhenBothTurnsStarted();
+        return;
+      }
+      case "turn/interrupt":
+        this.queue.push({ id: request.id, result: {} });
+        return;
+      default:
+        this.queue.push({
+          id: request.id,
+          error: { message: `Unexpected request: ${request.method}` },
+        });
+    }
+  }
+
+  close(): void {
+    this.queue.close();
+  }
+
+  completeSecond(): void {
+    this.pushSuccessfulTurnEvents("thread-2", "turn-2", "second response");
+  }
+
+  private pushLegacyApprovalWhenBothTurnsStarted(): void {
+    if (!this.firstTurnStarted || !this.secondTurnStarted || this.approvalSent) {
+      return;
+    }
+    this.approvalSent = true;
+    this.queue.push({
+      id: "approval-legacy-1",
+      method: "execCommandApproval",
+      params: {
+        conversationId: "conversation-1",
+        callId: "call-1",
+        command: "npm test",
       },
     });
   }

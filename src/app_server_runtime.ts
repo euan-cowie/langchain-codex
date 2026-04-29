@@ -415,7 +415,7 @@ class AppServerConnection {
     if (isServerRequest(message)) {
       void this.handleServerRequest(message).catch((error) => {
         const normalized = error instanceof Error ? error : new Error(String(error));
-        this.emitError(normalized, message.params);
+        this.emitServerRequestError(normalized, message.params);
       });
       return;
     }
@@ -446,7 +446,10 @@ class AppServerConnection {
     if (isApprovalRequestMethod(message.method)) {
       try {
         const decision = await this.resolveApprovalDecision(message);
-        this.transport.send({ id: message.id, result: { decision } });
+        this.transport.send({
+          id: message.id,
+          result: { decision: approvalResponseDecision(message.method, decision) },
+        });
       } catch (error) {
         const normalized = error instanceof Error ? error : new Error(String(error));
         this.transport.send({
@@ -456,7 +459,7 @@ class AppServerConnection {
             message: normalized.message,
           },
         });
-        this.emitError(normalized, message.params);
+        this.emitServerRequestError(normalized, message.params);
       }
       return;
     }
@@ -472,7 +475,7 @@ class AppServerConnection {
           message: error.message,
         },
       });
-      this.emitError(error, message.params);
+      this.emitServerRequestError(error, message.params);
       return;
     }
 
@@ -531,6 +534,14 @@ class AppServerConnection {
     for (const handler of this.notificationHandlers) {
       handler(message);
     }
+  }
+
+  private emitServerRequestError(error: Error, routingParams: unknown): void {
+    const routing = getRecord(routingParams);
+    if (getString(routing, "threadId") === undefined && getString(routing, "turnId") === undefined) {
+      return;
+    }
+    this.emitError(error, routingParams);
   }
 }
 
@@ -1134,6 +1145,10 @@ function isApprovalRequestMethod(method: string): boolean {
   );
 }
 
+function isLegacyApprovalRequestMethod(method: string): boolean {
+  return method === "execCommandApproval" || method === "applyPatchApproval";
+}
+
 function isDynamicToolRequestMethod(method: string): boolean {
   return method === "item/tool/call";
 }
@@ -1142,6 +1157,25 @@ function approvalRequestKind(method: string): "command" | "file_change" {
   return method === "item/commandExecution/requestApproval" || method === "execCommandApproval"
     ? "command"
     : "file_change";
+}
+
+function approvalResponseDecision(
+  method: string,
+  decision: CodexAppServerApprovalDecision,
+): CodexAppServerApprovalDecision | "approved" | "approved_for_session" | "denied" | "abort" {
+  if (!isLegacyApprovalRequestMethod(method)) {
+    return decision;
+  }
+  switch (decision) {
+    case "accept":
+      return "approved";
+    case "acceptForSession":
+      return "approved_for_session";
+    case "decline":
+      return "denied";
+    case "cancel":
+      return "abort";
+  }
 }
 
 function isApprovalDecision(value: unknown): value is CodexAppServerApprovalDecision {
