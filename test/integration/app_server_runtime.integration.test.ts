@@ -13,6 +13,9 @@ const appServerIntegrationTimeoutMs = Number(
     process.env.CODEX_INTEGRATION_TIMEOUT_MS ??
     180_000,
 );
+const appServerCloseTimeoutMs = Number(
+  process.env.CODEX_APP_SERVER_INTEGRATION_CLOSE_TIMEOUT_MS ?? 30_000,
+);
 
 describe.skipIf(!runAppServerIntegrationTests)("ChatCodexSDK App Server integration", () => {
   it(
@@ -22,7 +25,7 @@ describe.skipIf(!runAppServerIntegrationTests)("ChatCodexSDK App Server integrat
 
       try {
         const response = await model.invoke(
-          'Reply with exactly this lowercase token and no punctuation: app-server-invoke-ok',
+          "Reply with exactly this lowercase token and no punctuation: app-server-invoke-ok",
         );
 
         expect(response.text.toLowerCase()).toContain("app-server-invoke-ok");
@@ -45,7 +48,7 @@ describe.skipIf(!runAppServerIntegrationTests)("ChatCodexSDK App Server integrat
 
       try {
         const stream = await model.stream(
-          'Reply with exactly this lowercase token and no punctuation: app-server-stream-ok',
+          "Reply with exactly this lowercase token and no punctuation: app-server-stream-ok",
         );
         let streamedText = "";
         let streamedThreadId: unknown;
@@ -60,7 +63,7 @@ describe.skipIf(!runAppServerIntegrationTests)("ChatCodexSDK App Server integrat
         expect(streamedThreadId).toEqual(expect.any(String));
 
         const eventStream = model.streamEvents(
-          'Reply with exactly this lowercase token and no punctuation: app-server-events-ok',
+          "Reply with exactly this lowercase token and no punctuation: app-server-events-ok",
           { version: "v2" },
         );
         const customEventNames: string[] = [];
@@ -74,9 +77,7 @@ describe.skipIf(!runAppServerIntegrationTests)("ChatCodexSDK App Server integrat
         expect(customEventNames).toContain("codex.thread.started");
         expect(customEventNames).toContain("codex.turn.started");
         expect(customEventNames).toContain("codex.turn.completed");
-        expect(customEventNames.some((name) => name.startsWith("codex.agent_message."))).toBe(
-          true,
-        );
+        expect(customEventNames.some((name) => name.startsWith("codex.agent_message."))).toBe(true);
       } finally {
         await model.close();
       }
@@ -91,14 +92,14 @@ describe.skipIf(!runAppServerIntegrationTests)("ChatCodexSDK App Server integrat
 
       try {
         const first = await model.invoke(
-          'Reply with exactly this lowercase token and no punctuation: app-server-resume-one',
+          "Reply with exactly this lowercase token and no punctuation: app-server-resume-one",
         );
         const threadId = getCodexMetadata(first.response_metadata).threadId;
 
         expect(threadId).toEqual(expect.any(String));
 
         const second = await model.invoke(
-          'Reply with exactly this lowercase token and no punctuation: app-server-resume-two',
+          "Reply with exactly this lowercase token and no punctuation: app-server-resume-two",
           typeof threadId === "string" ? { threadId } : undefined,
         );
 
@@ -160,6 +161,43 @@ describe.skipIf(!runAppServerIntegrationTests)("ChatCodexSDK App Server integrat
     },
     appServerIntegrationTimeoutMs,
   );
+
+  it(
+    "closes the real App Server child after early stream cancellation",
+    async () => {
+      const model = createAppServerIntegrationModel();
+      const events = model.streamEvents(
+        "Start a long answer with app-server-cancel-ok, then write 100 short numbered lines.",
+        { version: "v2" },
+      );
+      const iterator = events[Symbol.asyncIterator]();
+      let closed = false;
+
+      try {
+        await waitForCustomEvent(iterator, "codex.turn.started", appServerIntegrationTimeoutMs);
+        await withTimeout(
+          cancelIterator(iterator),
+          appServerCloseTimeoutMs,
+          "Codex App Server stream did not cancel cleanly.",
+        );
+        await withTimeout(
+          model.close(),
+          appServerCloseTimeoutMs,
+          "Codex App Server child did not exit after close().",
+        );
+        closed = true;
+      } finally {
+        if (!closed) {
+          await withTimeout(
+            model.close(),
+            appServerCloseTimeoutMs,
+            "Codex App Server child did not exit during cleanup.",
+          );
+        }
+      }
+    },
+    appServerIntegrationTimeoutMs,
+  );
 });
 
 const multiplyTool = tool(({ a, b }: { a: number; b: number }) => a * b, {
@@ -202,4 +240,61 @@ function isCodexItemType(item: unknown, type: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+async function waitForCustomEvent(
+  iterator: AsyncIterator<unknown>,
+  eventName: string,
+  timeoutMs: number,
+): Promise<void> {
+  while (true) {
+    const next = await withTimeout(
+      iterator.next(),
+      timeoutMs,
+      `Timed out waiting for ${eventName}.`,
+    );
+
+    if (next.done === true) {
+      throw new Error(`Stream ended before ${eventName}.`);
+    }
+
+    if (isCustomEvent(next.value, eventName)) {
+      return;
+    }
+  }
+}
+
+function isCustomEvent(value: unknown, eventName: string): boolean {
+  return isRecord(value) && value.event === "on_custom_event" && value.name === eventName;
+}
+
+async function cancelIterator(iterator: AsyncIterator<unknown>): Promise<void> {
+  try {
+    await iterator.return?.();
+  } catch (error) {
+    if (!isAbortError(error)) {
+      throw error;
+    }
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return isRecord(error) && error.name === "AbortError";
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
 }
