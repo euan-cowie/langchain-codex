@@ -33,8 +33,8 @@ This package adapts the local Codex runtime to LangChain's `BaseChatModel` inter
 ```text
 LangChain / LangGraph JS
   -> ChatCodexSDK
-    -> @openai/codex-sdk
-      -> local codex CLI runtime
+    -> @openai/codex-sdk or codex app-server
+      -> local Codex runtime
         -> existing Codex auth session or API-key auth
 ```
 
@@ -70,6 +70,47 @@ npm run build
 - Node.js 20 or later.
 - `@openai/codex-sdk`, installed as a runtime dependency of this package.
 - Codex authentication configured through the Codex CLI, IDE/app, or API-key auth.
+
+## Runtime Backend
+
+`ChatCodexSDK` uses the TypeScript Codex SDK backend by default. An experimental App Server backend
+is available for users who want to test the migration path toward Codex's richer client protocol:
+
+```ts
+const model = new ChatCodexSDK({
+  runtime: "app-server",
+  model: "gpt-5.4",
+  workingDirectory: process.cwd(),
+});
+
+const response = await model.invoke("Summarize this repo.");
+await model.close();
+```
+
+The App Server backend speaks to a local `codex app-server` process over stdio. It is intended to
+become the default after parity testing covers invocation, streaming, structured output, approval
+handling, cancellation, and process cleanup. Until then, `runtime: "sdk"` remains the default.
+
+When App Server asks the client to approve a command or file change, the adapter calls
+`appServerApprovalHandler`. Without a handler, the default is to fail the turn clearly instead of
+leaving the App Server process waiting:
+
+```ts
+const model = new ChatCodexSDK({
+  runtime: "app-server",
+  approvalPolicy: "on-request",
+  appServerApprovalHandler: async (request) => {
+    if (request.kind === "command") {
+      return "accept";
+    }
+
+    return "decline";
+  },
+});
+```
+
+Set `appServerDefaultApprovalDecision` to `"decline"` or `"cancel"` when a host wants unattended
+approval requests to resolve without throwing.
 
 ## Module Format
 
@@ -194,8 +235,8 @@ console.log(result.parsed);
 
 ## Experimental Tool Calling
 
-`bindTools()` is available as an experimental LangChain compatibility layer. The Codex SDK does not
-currently expose a native JavaScript tool registration API, so this adapter uses Codex
+`bindTools()` is available as an experimental LangChain compatibility layer. The Codex local
+runtimes do not expose LangChain-standard JavaScript tool registration, so this adapter uses Codex
 `outputSchema` plus tool instructions to return LangChain `AIMessage.tool_calls`.
 
 There are three distinct tool surfaces:
@@ -208,7 +249,9 @@ There are three distinct tool surfaces:
 
 The `profile.toolCalling` and `profile.toolChoice` flags are `true` for the experimental
 LangChain-compatible `bindTools()` path. They should not be read as native Codex SDK tool
-registration support, and raw provider `tools` call options are still rejected.
+registration support, and raw provider `tools` call options are still rejected. The App Server
+runtime also has its own dynamic-tool protocol surface; `ChatCodexSDK` does not wire that surface to
+LangChain tools yet, and dynamic tool requests from App Server are rejected with a clear error.
 
 By default, bound-tool responses are treated as an unreliable protocol boundary. `ChatCodexSDK`
 asks Codex for a per-tool structured-output schema, validates the returned tool name and args, and
@@ -305,7 +348,7 @@ const graph = new StateGraph(MessagesAnnotation)
 ```
 
 This uses LangGraph to execute client-side LangChain tools. It does not turn those tools into native
-Codex runtime tools.
+Codex runtime tools or App Server dynamic tools.
 
 ## Model Profile
 
@@ -353,7 +396,8 @@ const second = await model.invoke(
 ### LangGraph Thread State
 
 For LangGraph, store the Codex `threadId` in graph state or checkpointed state, then pass it back as
-the next model call's `threadId`:
+the next model call's `threadId`. The same pattern works with `runtime: "sdk"` and
+`runtime: "app-server"`:
 
 ```ts
 import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
@@ -376,6 +420,7 @@ const CodexGraphState = Annotation.Root({
 });
 
 const model = new ChatCodexSDK({
+  runtime: "app-server",
   workingDirectory: process.cwd(),
   sandboxMode: "read-only",
 });
@@ -402,6 +447,7 @@ const config = { configurable: { thread_id: "langgraph-thread" } };
 
 await graph.invoke({ messages: [new HumanMessage("Inspect this repo.")] }, config);
 await graph.invoke({ messages: [new HumanMessage("Continue the review.")] }, config);
+await model.close();
 
 function getPendingCodexMessages(messages: BaseMessage[]): BaseMessage[] {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -427,6 +473,8 @@ Thread ownership rules:
 - Stateless `ChatCodexSDK` calls start new Codex threads by default.
 - Passing `threadId` resumes that Codex thread for the current call.
 - A model constructed with a default `threadId` sets `maxConcurrency: 1` unless you override it.
+- Do not pass LangGraph's checkpoint `thread_id` as Codex `threadId`; persist the Codex ID returned
+  in `response_metadata.codex.threadId`.
 - Branching graph paths should not mutate the same Codex thread concurrently.
 
 ## Working Directory and Sandbox
@@ -481,6 +529,15 @@ type ChatCodexSDKFields = {
   apiKey?: string;
   codexPathOverride?: string;
   codexConfig?: Record<string, unknown>;
+  appServerApprovalHandler?: (
+    request: CodexAppServerApprovalRequest,
+  ) =>
+    | "accept"
+    | "acceptForSession"
+    | "decline"
+    | "cancel"
+    | Promise<"accept" | "acceptForSession" | "decline" | "cancel">;
+  appServerDefaultApprovalDecision?: "decline" | "cancel" | "throw";
 
   timeoutMs?: number;
   maxConcurrency?: number;
@@ -536,6 +593,15 @@ Integration tests are opt-in because they require local Codex auth:
 ```bash
 RUN_CODEX_INTEGRATION_TESTS=1 npm run test:integration
 ```
+
+The experimental App Server runtime has a separate opt-in suite:
+
+```bash
+CODEX_APP_SERVER_INTEGRATION=1 npm run test:integration:app-server
+```
+
+Set `CODEX_APP_SERVER_INTEGRATION_MODEL` or `CODEX_INTEGRATION_MODEL` to override the default
+model, and `CODEX_APP_SERVER_INTEGRATION_TIMEOUT_MS` for slower local runs.
 
 ## Version Compatibility
 

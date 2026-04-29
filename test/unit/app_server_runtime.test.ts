@@ -1,0 +1,1771 @@
+import { existsSync } from "node:fs";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+import { tool } from "@langchain/core/tools";
+import { z } from "zod";
+import { ChatCodexSDK } from "../../src/index.js";
+import { AppServerCodexClient, type AppServerTransport } from "../../src/app_server_runtime.js";
+
+describe("AppServerCodexClient", () => {
+  it("runs a turn through the app-server JSON-RPC protocol", async () => {
+    const transport = new FakeAppServerTransport();
+    const client = new AppServerCodexClient({ transport });
+    const thread = client.startThread({
+      model: "gpt-5.4",
+      workingDirectory: "/repo",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      modelReasoningEffort: "high",
+      networkAccessEnabled: true,
+      additionalDirectories: ["/shared", "/tools"],
+      webSearchMode: "live",
+    });
+
+    const result = await thread.run("Human:\nHello.", {
+      outputSchema: {
+        type: "object",
+        properties: { answer: { type: "string" } },
+        required: ["answer"],
+      },
+    });
+    await client.close();
+
+    expect(result.finalResponse).toBe("Hello world");
+    expect(result.usage).toEqual({
+      input_tokens: 10,
+      cached_input_tokens: 2,
+      output_tokens: 5,
+      reasoning_output_tokens: 1,
+    });
+    expect(thread.id).toBe("thread-app");
+    expect(transport.sent.map((message) => message.method)).toEqual([
+      "initialize",
+      "initialized",
+      "thread/start",
+      "turn/start",
+    ]);
+
+    const initialize = transport.sent.find((message) => message.method === "initialize");
+    expect(initialize?.params).toMatchObject({
+      capabilities: {
+        experimentalApi: true,
+      },
+    });
+
+    const initialized = transport.sent.find((message) => message.method === "initialized");
+    expect(initialized?.params).toBeUndefined();
+
+    const threadStart = transport.sent.find((message) => message.method === "thread/start");
+    expect(threadStart?.params).toMatchObject({
+      model: "gpt-5.4",
+      cwd: "/repo",
+      approvalPolicy: "never",
+      sandbox: "workspace-write",
+      config: {
+        sandbox_workspace_write: {
+          network_access: true,
+          writable_roots: ["/shared", "/tools"],
+        },
+        web_search: "live",
+      },
+    });
+
+    const turnStart = transport.sent.find((message) => message.method === "turn/start");
+    expect(turnStart?.params).toMatchObject({
+      threadId: "thread-app",
+      input: [{ type: "text", text: "Human:\nHello.", text_elements: [] }],
+      model: "gpt-5.4",
+      cwd: "/repo",
+      approvalPolicy: "never",
+      effort: "high",
+      outputSchema: {
+        type: "object",
+        properties: { answer: { type: "string" } },
+        required: ["answer"],
+      },
+    });
+  });
+
+  it("streams app-server deltas through ChatCodexSDK chunks", async () => {
+    const transport = new FakeAppServerTransport();
+    const client = new AppServerCodexClient({ transport });
+    const model = new ChatCodexSDK({
+      runtime: "app-server",
+      codexClient: client,
+    });
+
+    const stream = await model.stream("Say hello.");
+    let text = "";
+    let threadId: unknown;
+
+    for await (const chunk of stream) {
+      text += chunk.text;
+      threadId = (chunk.response_metadata.codex as { threadId?: string } | undefined)?.threadId;
+    }
+    await model.close();
+
+    expect(text).toBe("Hello world");
+    expect(threadId).toBe("thread-app");
+  });
+
+  it("does not route events to runs before their App Server thread id is known", async () => {
+    const transport = new InterleavedThreadStartTransport();
+    const client = new AppServerCodexClient({ transport });
+
+    const [first, second] = await withTimeout(
+      Promise.all([
+        client.startThread().run("First prompt."),
+        client.startThread().run("Second prompt."),
+      ]),
+      5_000,
+    );
+    await client.close();
+
+    expect(first.finalResponse).toBe("first response");
+    expect(second.finalResponse).toBe("second response");
+  });
+
+  it("routes server-request errors only to the owning App Server turn", async () => {
+    const transport = new ConcurrentServerRequestErrorTransport();
+    const client = new AppServerCodexClient({ transport });
+
+    const [first, second] = await withTimeout(
+      Promise.allSettled([
+        client.startThread().run("Use an unsupported dynamic tool."),
+        client.startThread().run("Keep running independently."),
+      ]),
+      5_000,
+    );
+    await client.close();
+
+    expect(first.status).toBe("rejected");
+    if (first.status === "rejected") {
+      expect(first.reason).toBeInstanceOf(Error);
+      expect((first.reason as Error).message).toContain("dynamic tools are not supported");
+    }
+    expect(second.status).toBe("fulfilled");
+    if (second.status === "fulfilled") {
+      expect(second.value.finalResponse).toBe("second response");
+    }
+  });
+
+  it("continues draining messages while approval handlers are pending", async () => {
+    const approval = createDeferred<"accept">();
+    const transport = new SlowApprovalTransport();
+    const client = new AppServerCodexClient({
+      transport,
+      approvalHandler: () => approval.promise,
+    });
+
+    const first = client.startThread().run("Needs approval.");
+    const second = client.startThread().run("Should finish independently.");
+
+    await expect(withTimeout(second, 5_000)).resolves.toMatchObject({
+      finalResponse: "second response",
+    });
+    expect(transport.approvalResponses).toEqual([]);
+
+    approval.resolve("accept");
+    await expect(withTimeout(first, 5_000)).resolves.toMatchObject({
+      finalResponse: "first response",
+    });
+    await client.close();
+  });
+
+  it("uses prompt-mediated bindTools through App Server outputSchema", async () => {
+    const finalResponse = JSON.stringify({
+      type: "tool_calls",
+      content: "",
+      tool_calls: [{ id: "call-1", name: "multiply", args: { a: 6, b: 7 } }],
+    });
+    const transport = new FakeAppServerTransport({ finalResponse });
+    const client = new AppServerCodexClient({ transport });
+    const model = new ChatCodexSDK({
+      runtime: "app-server",
+      codexClient: client,
+    });
+    const modelWithTools = model.bindTools([multiplyTool]);
+
+    const response = await modelWithTools.invoke("What is 6 * 7?");
+    await model.close();
+
+    expect(response.tool_calls).toEqual([
+      {
+        type: "tool_call",
+        id: "call-1",
+        name: "multiply",
+        args: { a: 6, b: 7 },
+      },
+    ]);
+    const turnStart = transport.sent.find((message) => message.method === "turn/start");
+    expect(turnStart?.params).toMatchObject({
+      outputSchema: {
+        properties: {
+          tool_calls: {
+            description:
+              "Client-side LangChain tool calls to execute. Use this only when type is tool_calls.",
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(turnStart?.params)).toContain(
+      "Experimental LangChain tool-calling mode",
+    );
+    expect(JSON.stringify(turnStart?.params)).toContain("multiply");
+  });
+
+  it("fails active turns when the app-server transport closes mid-turn", async () => {
+    const transport = new FakeAppServerTransport({ closeAfterTurnStarted: true });
+    const client = new AppServerCodexClient({ transport });
+
+    await expect(client.startThread().run("Wait forever.")).rejects.toThrow(
+      "Codex app-server connection closed.",
+    );
+    await expect(withTimeout(client.startThread().run("Try again."), 5_000)).rejects.toThrow(
+      "Codex app-server connection closed.",
+    );
+    await client.close();
+  });
+
+  it("closes the transport after the read loop has already failed", async () => {
+    const transport = new FailingReadLoopTransport();
+    const client = new AppServerCodexClient({ transport });
+
+    await expect(withTimeout(client.startThread().run("Trigger read failure."), 5_000)).rejects.toThrow(
+      "malformed app-server stdout",
+    );
+    expect(transport.closeCalls).toBe(0);
+
+    await client.close();
+    await client.close();
+
+    expect(transport.closeCalls).toBe(1);
+  });
+
+  it("interrupts App Server turns when streamed events are cancelled", async () => {
+    const transport = new FakeAppServerTransport({ holdAfterTurnStarted: true });
+    const client = new AppServerCodexClient({ transport });
+    const streamed = await client.startThread().runStreamed("Stream until cancelled.");
+    const iterator = streamed.events[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: "thread.started" },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: "turn.started" },
+    });
+    await iterator.return?.(undefined);
+    await waitUntil(() => transport.sent.some((message) => message.method === "turn/interrupt"));
+    await client.close();
+
+    const interrupt = transport.sent.find((message) => message.method === "turn/interrupt");
+    expect(interrupt?.params).toMatchObject({
+      threadId: "thread-app",
+      turnId: "turn-app",
+    });
+  });
+
+  it("fails active turns when the App Server client closes mid-turn", async () => {
+    const transport = new FakeAppServerTransport({ holdAfterTurnStarted: true });
+    const client = new AppServerCodexClient({ transport });
+
+    const run = client.startThread().run("Wait for close.");
+    await waitUntil(() => transport.sent.some((message) => message.method === "turn/start"));
+    await client.close();
+
+    await expect(withTimeout(run, 5_000)).rejects.toThrow(
+      "Codex app-server connection closed.",
+    );
+  });
+
+  it("honors aborts while waiting for App Server turn/start", async () => {
+    const transport = new DelayedTurnStartTransport();
+    const client = new AppServerCodexClient({ transport });
+    const controller = new AbortController();
+
+    const run = client.startThread().run("Wait for turn start.", {
+      signal: controller.signal,
+    });
+    await waitUntil(() => transport.sent.some((message) => message.method === "turn/start"));
+    controller.abort(new Error("deadline exceeded"));
+
+    await expect(withTimeout(run, 5_000)).rejects.toThrow("deadline exceeded");
+    transport.resolveTurnStart();
+    await waitUntil(() => transport.sent.some((message) => message.method === "turn/interrupt"));
+    await client.close();
+  });
+
+  it("handles rejected turn interrupts during abort", async () => {
+    const transport = new FakeAppServerTransport({
+      holdAfterTurnStarted: true,
+      rejectInterrupt: true,
+    });
+    const client = new AppServerCodexClient({ transport });
+    const controller = new AbortController();
+
+    const run = client.startThread().run("Wait for abort.", { signal: controller.signal });
+    await waitUntil(() => transport.sent.some((message) => message.method === "turn/start"));
+    controller.abort(new Error("deadline exceeded"));
+
+    await expect(withTimeout(run, 5_000)).rejects.toThrow("deadline exceeded");
+    await waitUntil(() => transport.sent.some((message) => message.method === "turn/interrupt"));
+    await client.close();
+  });
+
+  it("keeps active turns open for App Server retry notices", async () => {
+    const transport = new FakeAppServerTransport({ retryErrorBeforeSuccess: true });
+    const client = new AppServerCodexClient({ transport });
+
+    const result = await client.startThread().run("Recover after retry.");
+    await client.close();
+
+    expect(result.finalResponse).toBe("Hello world");
+  });
+
+  it("uses nested App Server error messages for terminal turn failures", async () => {
+    const transport = new FakeAppServerTransport({ fatalErrorBeforeSuccess: true });
+    const client = new AppServerCodexClient({ transport });
+
+    await expect(client.startThread().run("Fail.")).rejects.toThrow(
+      "terminal app-server error",
+    );
+    await client.close();
+  });
+
+  it("preserves App Server thread config when resuming a thread", async () => {
+    const transport = new FakeAppServerTransport();
+    const client = new AppServerCodexClient({ transport });
+    const thread = client.resumeThread("thread-existing", {
+      model: "gpt-5.4",
+      workingDirectory: "/repo",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      networkAccessEnabled: true,
+      additionalDirectories: ["/shared"],
+      webSearchMode: "live",
+    });
+
+    await thread.run("Continue.");
+    await client.close();
+
+    const resume = transport.sent.find((message) => message.method === "thread/resume");
+    expect(resume?.params).toMatchObject({
+      threadId: "thread-existing",
+      model: "gpt-5.4",
+      cwd: "/repo",
+      approvalPolicy: "never",
+      sandbox: "workspace-write",
+      config: {
+        sandbox_workspace_write: {
+          network_access: true,
+          writable_roots: ["/shared"],
+        },
+        web_search: "live",
+      },
+      persistExtendedHistory: true,
+    });
+  });
+
+  it("surfaces child-process spawn failures without hanging", async () => {
+    const client = new AppServerCodexClient({
+      codexPathOverride: "/tmp/langchain-codex-missing-codex-binary",
+    });
+
+    try {
+      await expect(
+        withTimeout(client.startThread().run("Hello."), 5_000),
+      ).rejects.toThrow(/ENOENT|spawn|no such file/i);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("waits for stdio App Server child processes to exit on close", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "langchain-codex-close-"));
+    const scriptPath = path.join(dir, "fake-codex.js");
+    const readyPath = path.join(dir, "ready");
+    const markerPath = path.join(dir, "closed");
+    await writeFile(
+      scriptPath,
+      `#!/usr/bin/env node
+const { writeFileSync } = require("node:fs");
+process.stdin.resume();
+process.on("SIGTERM", () => {
+  setTimeout(() => {
+    writeFileSync(${JSON.stringify(markerPath)}, "closed");
+    process.exit(0);
+  }, 50);
+});
+writeFileSync(${JSON.stringify(readyPath)}, "ready");
+`,
+    );
+    await chmod(scriptPath, 0o755);
+
+    try {
+      const client = new AppServerCodexClient({ codexPathOverride: scriptPath });
+      await waitUntil(() => existsSync(readyPath));
+      await client.close();
+
+      expect(existsSync(markerPath)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves nested empty codex config overrides for stdio App Server", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "langchain-codex-config-"));
+    const scriptPath = path.join(dir, "fake-codex.js");
+    const argvPath = path.join(dir, "argv.json");
+    await writeFile(
+      scriptPath,
+      `#!/usr/bin/env node
+const { writeFileSync } = require("node:fs");
+writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)));
+process.stdin.resume();
+`,
+    );
+    await chmod(scriptPath, 0o755);
+
+    try {
+      const client = new AppServerCodexClient({
+        codexPathOverride: scriptPath,
+        config: {
+          mcp_servers: {},
+          tools: {
+            local: {},
+          },
+        },
+      });
+      await waitUntil(() => existsSync(argvPath));
+      const args = JSON.parse(await readFile(argvPath, "utf8")) as string[];
+      await client.close();
+
+      expect(args).toContain("mcp_servers={}");
+      expect(args).toContain("tools.local={}");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes object-encoded file-change kinds", async () => {
+    const transport = new FakeAppServerTransport({
+      completedItems: [
+        {
+          id: "patch-1",
+          type: "fileChange",
+          status: "completed",
+          changes: [
+            {
+              path: "README.md",
+              kind: { type: "update", move_path: null },
+              diff: "@@",
+            },
+          ],
+        },
+      ],
+    });
+    const client = new AppServerCodexClient({ transport });
+
+    const result = await client.startThread().run("Edit README.");
+    await client.close();
+
+    expect(result.items).toContainEqual({
+      id: "patch-1",
+      type: "file_change",
+      status: "completed",
+      changes: [{ path: "README.md", kind: "update" }],
+    });
+  });
+
+  it("defers in-progress file-change items while streaming", async () => {
+    const transport = new FakeAppServerTransport({
+      startedItems: [
+        {
+          id: "patch-1",
+          type: "fileChange",
+          status: "inProgress",
+          changes: [
+            {
+              path: "README.md",
+              kind: { type: "update", move_path: null },
+              diff: "@@",
+            },
+          ],
+        },
+      ],
+    });
+    const client = new AppServerCodexClient({ transport });
+    const streamed = await client.startThread().runStreamed("Edit README.");
+    const fileChanges: unknown[] = [];
+
+    for await (const event of streamed.events) {
+      if (
+        (event.type === "item.started" ||
+          event.type === "item.updated" ||
+          event.type === "item.completed") &&
+        event.item.type === "file_change"
+      ) {
+        fileChanges.push(event.item);
+      }
+    }
+    await client.close();
+
+    expect(fileChanges).toEqual([]);
+  });
+
+  it("maps declined command approvals to a terminal failed command status", async () => {
+    const transport = new FakeAppServerTransport({
+      completedItems: [
+        {
+          id: "cmd-1",
+          type: "commandExecution",
+          command: "npm test",
+          status: "declined",
+          aggregatedOutput: "",
+          exitCode: null,
+        },
+      ],
+    });
+    const client = new AppServerCodexClient({ transport });
+
+    const result = await client.startThread().run("Run tests.");
+    await client.close();
+
+    expect(result.items).toContainEqual({
+      id: "cmd-1",
+      type: "command_execution",
+      command: "npm test",
+      aggregated_output: "",
+      status: "failed",
+    });
+  });
+
+  it("routes command approval requests through the configured handler", async () => {
+    const transport = new FakeAppServerTransport({
+      approvalRequest: {
+        id: "approval-command-1",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          itemId: "cmd-1",
+          command: "npm test",
+        },
+      },
+    });
+    const approvals: Array<{ kind: string; method: string; params: unknown }> = [];
+    const client = new AppServerCodexClient({
+      transport,
+      approvalHandler: (request) => {
+        approvals.push(request);
+        return "accept";
+      },
+    });
+
+    const result = await client.startThread().run("Run tests.");
+    await client.close();
+
+    expect(result.finalResponse).toBe("Hello world");
+    expect(approvals).toEqual([
+      {
+        kind: "command",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          itemId: "cmd-1",
+          command: "npm test",
+        },
+      },
+    ]);
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-command-1",
+        result: { decision: "accept" },
+      },
+    ]);
+  });
+
+  it("routes legacy command approval requests through the configured handler", async () => {
+    const transport = new FakeAppServerTransport({
+      approvalRequest: {
+        id: "approval-command-legacy",
+        method: "execCommandApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          command: "npm test",
+        },
+      },
+    });
+    const approvals: Array<{ kind: string; method: string; params: unknown }> = [];
+    const client = new AppServerCodexClient({
+      transport,
+      approvalHandler: (request) => {
+        approvals.push(request);
+        return "accept";
+      },
+    });
+
+    const result = await client.startThread().run("Run tests.");
+    await client.close();
+
+    expect(result.finalResponse).toBe("Hello world");
+    expect(approvals).toEqual([
+      {
+        kind: "command",
+        method: "execCommandApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          command: "npm test",
+        },
+      },
+    ]);
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-command-legacy",
+        result: { decision: "approved" },
+      },
+    ]);
+  });
+
+  it("uses the configured default decision for file-change approval requests", async () => {
+    const transport = new FakeAppServerTransport({
+      approvalRequest: {
+        id: "approval-file-1",
+        method: "item/fileChange/requestApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          itemId: "patch-1",
+          changes: [{ path: "README.md", kind: "update" }],
+        },
+      },
+    });
+    const client = new AppServerCodexClient({
+      transport,
+      defaultApprovalDecision: "cancel",
+    });
+
+    const result = await client.startThread().run("Edit README.");
+    await client.close();
+
+    expect(result.finalResponse).toBe("Hello world");
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-file-1",
+        result: { decision: "cancel" },
+      },
+    ]);
+  });
+
+  it("uses the configured default decision for legacy file-change approval requests", async () => {
+    const transport = new FakeAppServerTransport({
+      approvalRequest: {
+        id: "approval-file-legacy",
+        method: "applyPatchApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          changes: [{ path: "README.md", kind: "update" }],
+        },
+      },
+    });
+    const client = new AppServerCodexClient({
+      transport,
+      defaultApprovalDecision: "cancel",
+    });
+
+    const result = await client.startThread().run("Edit README.");
+    await client.close();
+
+    expect(result.finalResponse).toBe("Hello world");
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-file-legacy",
+        result: { decision: "abort" },
+      },
+    ]);
+  });
+
+  it("does not broadcast unrouted legacy approval errors to unrelated turns", async () => {
+    const transport = new LegacyApprovalErrorRoutingTransport();
+    const client = new AppServerCodexClient({ transport });
+
+    const first = client.startThread().run("Needs legacy approval.");
+    const second = client.startThread().run("Should not fail.");
+
+    await waitUntil(() => transport.approvalResponses.length === 1);
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-legacy-1",
+        error: {
+          code: -32000,
+          message:
+            "Codex app-server requested command approval, but no appServerApprovalHandler is configured.",
+        },
+      },
+    ]);
+
+    transport.completeSecond();
+    await expect(withTimeout(second, 5_000)).resolves.toMatchObject({
+      finalResponse: "second response",
+    });
+
+    await client.close();
+    await expect(first).rejects.toThrow("Codex app-server connection closed.");
+  });
+
+  it("fails clearly when an approval request has no handler", async () => {
+    const transport = new FakeAppServerTransport({
+      approvalRequest: {
+        id: "approval-command-1",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          itemId: "cmd-1",
+          command: "npm test",
+        },
+      },
+    });
+    const client = new AppServerCodexClient({ transport });
+
+    await expect(client.startThread().run("Run tests.")).rejects.toThrow(
+      "no appServerApprovalHandler is configured",
+    );
+    await client.close();
+
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-command-1",
+        error: {
+          code: -32000,
+          message:
+            "Codex app-server requested command approval, but no appServerApprovalHandler is configured.",
+        },
+      },
+    ]);
+  });
+
+  it("fails clearly when the approval handler throws", async () => {
+    const transport = new FakeAppServerTransport({
+      approvalRequest: {
+        id: "approval-file-1",
+        method: "item/fileChange/requestApproval",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          itemId: "patch-1",
+          changes: [{ path: "README.md", kind: "update" }],
+        },
+      },
+    });
+    const client = new AppServerCodexClient({
+      transport,
+      approvalHandler: () => {
+        throw new Error("approval UI failed");
+      },
+    });
+
+    await expect(client.startThread().run("Edit README.")).rejects.toThrow("approval UI failed");
+    await client.close();
+
+    expect(transport.approvalResponses).toEqual([
+      {
+        id: "approval-file-1",
+        error: {
+          code: -32000,
+          message: "approval UI failed",
+        },
+      },
+    ]);
+  });
+
+  it("rejects App Server dynamic tool requests instead of treating them as LangChain tools", async () => {
+    const transport = new FakeAppServerTransport({
+      serverRequest: {
+        id: "dynamic-tool-1",
+        method: "item/tool/call",
+        params: {
+          threadId: "thread-app",
+          turnId: "turn-app",
+          itemId: "tool-1",
+          tool: "multiply",
+          arguments: { a: 6, b: 7 },
+        },
+      },
+    });
+    const client = new AppServerCodexClient({ transport });
+
+    await expect(client.startThread().run("Use a dynamic tool.")).rejects.toThrow(
+      "App Server dynamic tools are not supported",
+    );
+    await client.close();
+
+    expect(transport.serverRequestResponses).toEqual([
+      {
+        id: "dynamic-tool-1",
+        error: {
+          code: -32601,
+          message:
+            "Codex App Server dynamic tools are not supported by ChatCodexSDK. Use ChatCodexSDK.bindTools() for LangChain-standard tool calls.",
+        },
+      },
+    ]);
+  });
+});
+
+type SentMessage = {
+  method?: string;
+  id?: number | string;
+  params?: unknown;
+  result?: unknown;
+  error?: unknown;
+};
+
+type SentRequest = SentMessage & { id: number | string; method: string };
+
+class FakeAppServerTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  readonly serverRequestResponses: SentMessage[] = [];
+  private readonly queue = new MessageQueue<SentMessage>();
+  private threadId = "thread-app";
+  readonly messages: AsyncIterable<SentMessage> = this.queue;
+
+  constructor(
+    private readonly options: {
+      approvalRequest?: SentMessage & { id: number | string; method: string };
+      serverRequest?: SentMessage & { id: number | string; method: string };
+      finalResponse?: string;
+      startedItems?: Array<Record<string, unknown>>;
+      completedItems?: Array<Record<string, unknown>>;
+      closeAfterTurnStarted?: boolean;
+      holdAfterTurnStarted?: boolean;
+      rejectInterrupt?: boolean;
+      retryErrorBeforeSuccess?: boolean;
+      fatalErrorBeforeSuccess?: boolean;
+    } = {},
+  ) {}
+
+  get approvalResponses(): SentMessage[] {
+    return this.serverRequestResponses;
+  }
+
+  send(message: unknown): void {
+    const sent = message as SentMessage;
+    this.sent.push(sent);
+    const serverRequest = this.options.serverRequest ?? this.options.approvalRequest;
+
+    if (
+      serverRequest !== undefined &&
+      sent.id === serverRequest.id &&
+      sent.method === undefined
+    ) {
+      this.serverRequestResponses.push(sent);
+      if (sent.result !== undefined) {
+        this.pushSuccessfulTurnEvents();
+      }
+      return;
+    }
+
+    if (sent.id === undefined || sent.method === undefined) {
+      return;
+    }
+
+    switch (sent.method) {
+      case "initialize":
+        this.queue.push({ id: sent.id, result: { userAgent: "fake" } });
+        return;
+      case "thread/start":
+        this.threadId = "thread-app";
+        this.queue.push({
+          id: sent.id,
+          result: {
+            thread: {
+              id: this.threadId,
+            },
+          },
+        });
+        return;
+      case "thread/resume":
+        this.threadId = getSentString(sent.params, "threadId") ?? this.threadId;
+        this.queue.push({
+          id: sent.id,
+          result: {
+            thread: {
+              id: this.threadId,
+            },
+          },
+        });
+        return;
+      case "turn/start":
+        this.threadId = getSentString(sent.params, "threadId") ?? this.threadId;
+        this.queue.push({
+          id: sent.id,
+          result: {
+            turn: {
+              id: "turn-app",
+              status: "inProgress",
+              items: [],
+              error: null,
+            },
+          },
+        });
+        this.queue.push({
+          method: "turn/started",
+          params: {
+            threadId: this.threadId,
+            turn: { id: "turn-app" },
+          },
+        });
+        for (const item of this.options.startedItems ?? []) {
+          this.queue.push({
+            method: "item/started",
+            params: {
+              threadId: this.threadId,
+              turnId: "turn-app",
+              item,
+            },
+          });
+        }
+        if (this.options.closeAfterTurnStarted === true) {
+          this.queue.close();
+          return;
+        }
+        if (this.options.holdAfterTurnStarted === true) {
+          return;
+        }
+        if (serverRequest !== undefined) {
+          this.queue.push(serverRequest);
+          return;
+        }
+        if (this.options.retryErrorBeforeSuccess === true) {
+          this.queue.push({
+            method: "error",
+            params: {
+              threadId: this.threadId,
+              turnId: "turn-app",
+              willRetry: true,
+              error: {
+                message: "temporary app-server error",
+              },
+            },
+          });
+        }
+        if (this.options.fatalErrorBeforeSuccess === true) {
+          this.queue.push({
+            method: "error",
+            params: {
+              threadId: this.threadId,
+              turnId: "turn-app",
+              willRetry: false,
+              error: {
+                message: "terminal app-server error",
+              },
+            },
+          });
+          return;
+        }
+        this.pushSuccessfulTurnEvents();
+        return;
+      case "turn/interrupt":
+        this.queue.push(
+          this.options.rejectInterrupt === true
+            ? { id: sent.id, error: { message: "interrupt rejected" } }
+            : { id: sent.id, result: {} },
+        );
+        return;
+      default:
+        this.queue.push({
+          id: sent.id,
+          error: { message: `Unexpected request: ${sent.method}` },
+        });
+    }
+  }
+
+  close(): void {
+    this.queue.close();
+  }
+
+  private pushSuccessfulTurnEvents(): void {
+    const finalResponse = this.options.finalResponse ?? "Hello world";
+    const midpoint = Math.ceil(finalResponse.length / 2);
+    this.queue.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: this.threadId,
+        turnId: "turn-app",
+        itemId: "msg-1",
+        delta: finalResponse.slice(0, midpoint),
+      },
+    });
+    this.queue.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: this.threadId,
+        turnId: "turn-app",
+        itemId: "msg-1",
+        delta: finalResponse.slice(midpoint),
+      },
+    });
+    this.queue.push({
+      method: "item/completed",
+      params: {
+        threadId: this.threadId,
+        turnId: "turn-app",
+        item: {
+          id: "msg-1",
+          type: "agentMessage",
+          text: finalResponse,
+        },
+      },
+    });
+    for (const item of this.options.completedItems ?? []) {
+      this.queue.push({
+        method: "item/completed",
+        params: {
+          threadId: this.threadId,
+          turnId: "turn-app",
+          item,
+        },
+      });
+    }
+    this.queue.push({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: this.threadId,
+        turnId: "turn-app",
+        tokenUsage: {
+          last: {
+            inputTokens: 10,
+            cachedInputTokens: 2,
+            outputTokens: 5,
+            reasoningOutputTokens: 1,
+          },
+        },
+      },
+    });
+    this.queue.push({
+      method: "turn/completed",
+      params: {
+        threadId: this.threadId,
+        turn: {
+          id: "turn-app",
+          status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+    });
+  }
+}
+
+class FailingReadLoopTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  readonly messages: AsyncIterable<SentMessage> = this.readMessages();
+  closeCalls = 0;
+
+  send(message: unknown): void {
+    this.sent.push(message as SentMessage);
+  }
+
+  close(): void {
+    this.closeCalls += 1;
+  }
+
+  private async *readMessages(): AsyncGenerator<SentMessage> {
+    yield { id: 0, result: { userAgent: "fake" } };
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    throw new Error("malformed app-server stdout");
+  }
+}
+
+class InterleavedThreadStartTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  private readonly queue = new MessageQueue<SentMessage>();
+  private readonly pendingThreadStarts: SentRequest[] = [];
+  readonly messages: AsyncIterable<SentMessage> = this.queue;
+
+  send(message: unknown): void {
+    const sent = message as SentMessage;
+    this.sent.push(sent);
+
+    if (sent.id === undefined || sent.method === undefined) {
+      return;
+    }
+    const request = sent as SentRequest;
+
+    switch (request.method) {
+      case "initialize":
+        this.queue.push({ id: request.id, result: { userAgent: "fake" } });
+        return;
+      case "thread/start":
+        this.pendingThreadStarts.push(request);
+        if (this.pendingThreadStarts.length === 2) {
+          const first = this.pendingThreadStarts[0];
+          if (first === undefined) {
+            return;
+          }
+          this.queue.push({
+            id: first.id,
+            result: {
+              thread: {
+                id: "thread-1",
+              },
+            },
+          });
+        }
+        return;
+      case "turn/start": {
+        const threadId = getSentString(sent.params, "threadId") ?? "thread-unknown";
+        const turnId = threadId === "thread-1" ? "turn-1" : "turn-2";
+        const response = threadId === "thread-1" ? "first response" : "second response";
+        this.queue.push({
+          id: request.id,
+          result: {
+            turn: {
+              id: turnId,
+              status: "inProgress",
+              items: [],
+              error: null,
+            },
+          },
+        });
+        this.pushSuccessfulTurnEvents(threadId, turnId, response);
+        if (threadId === "thread-1") {
+          const second = this.pendingThreadStarts[1];
+          if (second !== undefined) {
+            this.queue.push({
+              id: second.id,
+              result: {
+                thread: {
+                  id: "thread-2",
+                },
+              },
+            });
+          }
+        }
+        return;
+      }
+      default:
+        this.queue.push({
+          id: request.id,
+          error: { message: `Unexpected request: ${request.method}` },
+        });
+    }
+  }
+
+  close(): void {
+    this.queue.close();
+  }
+
+  private pushSuccessfulTurnEvents(threadId: string, turnId: string, finalResponse: string): void {
+    this.queue.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId,
+        turnId,
+        itemId: `msg-${turnId}`,
+        delta: finalResponse,
+      },
+    });
+    this.queue.push({
+      method: "item/completed",
+      params: {
+        threadId,
+        turnId,
+        item: {
+          id: `msg-${turnId}`,
+          type: "agentMessage",
+          text: finalResponse,
+        },
+      },
+    });
+    this.queue.push({
+      method: "turn/completed",
+      params: {
+        threadId,
+        turn: {
+          id: turnId,
+          status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+    });
+  }
+}
+
+class DelayedTurnStartTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  private readonly queue = new MessageQueue<SentMessage>();
+  private turnStartRequest: SentRequest | null = null;
+  readonly messages: AsyncIterable<SentMessage> = this.queue;
+
+  send(message: unknown): void {
+    const sent = message as SentMessage;
+    this.sent.push(sent);
+
+    if (sent.id === undefined || sent.method === undefined) {
+      return;
+    }
+    const request = sent as SentRequest;
+
+    switch (request.method) {
+      case "initialize":
+        this.queue.push({ id: request.id, result: { userAgent: "fake" } });
+        return;
+      case "thread/start":
+        this.queue.push({
+          id: request.id,
+          result: {
+            thread: {
+              id: "thread-app",
+            },
+          },
+        });
+        return;
+      case "turn/start":
+        this.turnStartRequest = request;
+        return;
+      case "turn/interrupt":
+        this.queue.push({ id: request.id, result: {} });
+        return;
+      default:
+        this.queue.push({
+          id: request.id,
+          error: { message: `Unexpected request: ${request.method}` },
+        });
+    }
+  }
+
+  close(): void {
+    this.queue.close();
+  }
+
+  resolveTurnStart(): void {
+    if (this.turnStartRequest === null) {
+      throw new Error("No delayed turn/start request is pending.");
+    }
+    this.queue.push({
+      id: this.turnStartRequest.id,
+      result: {
+        turn: {
+          id: "turn-app",
+          status: "inProgress",
+          items: [],
+          error: null,
+        },
+      },
+    });
+  }
+}
+
+class ConcurrentServerRequestErrorTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  readonly serverRequestResponses: SentMessage[] = [];
+  private readonly queue = new MessageQueue<SentMessage>();
+  private threadStartCount = 0;
+  private firstTurnStarted = false;
+  private secondTurnStarted = false;
+  private toolRequestSent = false;
+  readonly messages: AsyncIterable<SentMessage> = this.queue;
+
+  send(message: unknown): void {
+    const sent = message as SentMessage;
+    this.sent.push(sent);
+
+    if (sent.id === "dynamic-tool-1" && sent.method === undefined) {
+      this.serverRequestResponses.push(sent);
+      this.pushSuccessfulTurnEvents("thread-2", "turn-2", "second response");
+      return;
+    }
+
+    if (sent.id === undefined || sent.method === undefined) {
+      return;
+    }
+    const request = sent as SentRequest;
+
+    switch (request.method) {
+      case "initialize":
+        this.queue.push({ id: request.id, result: { userAgent: "fake" } });
+        return;
+      case "thread/start": {
+        this.threadStartCount += 1;
+        this.queue.push({
+          id: request.id,
+          result: {
+            thread: {
+              id: `thread-${this.threadStartCount}`,
+            },
+          },
+        });
+        return;
+      }
+      case "turn/start": {
+        const threadId = getSentString(sent.params, "threadId") ?? "thread-unknown";
+        const turnId = threadId === "thread-1" ? "turn-1" : "turn-2";
+        this.queue.push({
+          id: request.id,
+          result: {
+            turn: {
+              id: turnId,
+              status: "inProgress",
+              items: [],
+              error: null,
+            },
+          },
+        });
+        this.queue.push({
+          method: "turn/started",
+          params: {
+            threadId,
+            turn: { id: turnId },
+          },
+        });
+        if (threadId === "thread-1") {
+          this.firstTurnStarted = true;
+        } else if (threadId === "thread-2") {
+          this.secondTurnStarted = true;
+        }
+        this.pushToolRequestWhenBothTurnsStarted();
+        return;
+      }
+      case "turn/interrupt":
+        this.queue.push({ id: request.id, result: {} });
+        return;
+      default:
+        this.queue.push({
+          id: request.id,
+          error: { message: `Unexpected request: ${request.method}` },
+        });
+    }
+  }
+
+  close(): void {
+    this.queue.close();
+  }
+
+  private pushToolRequestWhenBothTurnsStarted(): void {
+    if (!this.firstTurnStarted || !this.secondTurnStarted || this.toolRequestSent) {
+      return;
+    }
+    this.toolRequestSent = true;
+    this.queue.push({
+      id: "dynamic-tool-1",
+      method: "item/tool/call",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "tool-1",
+        tool: "multiply",
+        arguments: { a: 6, b: 7 },
+      },
+    });
+  }
+
+  private pushSuccessfulTurnEvents(threadId: string, turnId: string, finalResponse: string): void {
+    this.queue.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId,
+        turnId,
+        itemId: `msg-${turnId}`,
+        delta: finalResponse,
+      },
+    });
+    this.queue.push({
+      method: "item/completed",
+      params: {
+        threadId,
+        turnId,
+        item: {
+          id: `msg-${turnId}`,
+          type: "agentMessage",
+          text: finalResponse,
+        },
+      },
+    });
+    this.queue.push({
+      method: "turn/completed",
+      params: {
+        threadId,
+        turn: {
+          id: turnId,
+          status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+    });
+  }
+}
+
+class LegacyApprovalErrorRoutingTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  readonly approvalResponses: SentMessage[] = [];
+  private readonly queue = new MessageQueue<SentMessage>();
+  private threadStartCount = 0;
+  private firstTurnStarted = false;
+  private secondTurnStarted = false;
+  private approvalSent = false;
+  readonly messages: AsyncIterable<SentMessage> = this.queue;
+
+  send(message: unknown): void {
+    const sent = message as SentMessage;
+    this.sent.push(sent);
+
+    if (sent.id === "approval-legacy-1" && sent.method === undefined) {
+      this.approvalResponses.push(sent);
+      return;
+    }
+
+    if (sent.id === undefined || sent.method === undefined) {
+      return;
+    }
+    const request = sent as SentRequest;
+
+    switch (request.method) {
+      case "initialize":
+        this.queue.push({ id: request.id, result: { userAgent: "fake" } });
+        return;
+      case "thread/start": {
+        this.threadStartCount += 1;
+        this.queue.push({
+          id: request.id,
+          result: {
+            thread: {
+              id: `thread-${this.threadStartCount}`,
+            },
+          },
+        });
+        return;
+      }
+      case "turn/start": {
+        const threadId = getSentString(sent.params, "threadId") ?? "thread-unknown";
+        const turnId = threadId === "thread-1" ? "turn-1" : "turn-2";
+        this.queue.push({
+          id: request.id,
+          result: {
+            turn: {
+              id: turnId,
+              status: "inProgress",
+              items: [],
+              error: null,
+            },
+          },
+        });
+        this.queue.push({
+          method: "turn/started",
+          params: {
+            threadId,
+            turn: { id: turnId },
+          },
+        });
+        if (threadId === "thread-1") {
+          this.firstTurnStarted = true;
+        } else if (threadId === "thread-2") {
+          this.secondTurnStarted = true;
+        }
+        this.pushLegacyApprovalWhenBothTurnsStarted();
+        return;
+      }
+      case "turn/interrupt":
+        this.queue.push({ id: request.id, result: {} });
+        return;
+      default:
+        this.queue.push({
+          id: request.id,
+          error: { message: `Unexpected request: ${request.method}` },
+        });
+    }
+  }
+
+  close(): void {
+    this.queue.close();
+  }
+
+  completeSecond(): void {
+    this.pushSuccessfulTurnEvents("thread-2", "turn-2", "second response");
+  }
+
+  private pushLegacyApprovalWhenBothTurnsStarted(): void {
+    if (!this.firstTurnStarted || !this.secondTurnStarted || this.approvalSent) {
+      return;
+    }
+    this.approvalSent = true;
+    this.queue.push({
+      id: "approval-legacy-1",
+      method: "execCommandApproval",
+      params: {
+        conversationId: "conversation-1",
+        callId: "call-1",
+        command: "npm test",
+      },
+    });
+  }
+
+  private pushSuccessfulTurnEvents(threadId: string, turnId: string, finalResponse: string): void {
+    this.queue.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId,
+        turnId,
+        itemId: `msg-${turnId}`,
+        delta: finalResponse,
+      },
+    });
+    this.queue.push({
+      method: "item/completed",
+      params: {
+        threadId,
+        turnId,
+        item: {
+          id: `msg-${turnId}`,
+          type: "agentMessage",
+          text: finalResponse,
+        },
+      },
+    });
+    this.queue.push({
+      method: "turn/completed",
+      params: {
+        threadId,
+        turn: {
+          id: turnId,
+          status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+    });
+  }
+}
+
+class SlowApprovalTransport implements AppServerTransport {
+  readonly sent: SentMessage[] = [];
+  readonly approvalResponses: SentMessage[] = [];
+  private readonly queue = new MessageQueue<SentMessage>();
+  private threadStartCount = 0;
+  readonly messages: AsyncIterable<SentMessage> = this.queue;
+
+  send(message: unknown): void {
+    const sent = message as SentMessage;
+    this.sent.push(sent);
+
+    if (sent.id === "approval-1" && sent.method === undefined) {
+      this.approvalResponses.push(sent);
+      this.pushSuccessfulTurnEvents("thread-1", "turn-1", "first response");
+      return;
+    }
+
+    if (sent.id === undefined || sent.method === undefined) {
+      return;
+    }
+    const request = sent as SentRequest;
+
+    switch (request.method) {
+      case "initialize":
+        this.queue.push({ id: request.id, result: { userAgent: "fake" } });
+        return;
+      case "thread/start": {
+        this.threadStartCount += 1;
+        this.queue.push({
+          id: request.id,
+          result: {
+            thread: {
+              id: `thread-${this.threadStartCount}`,
+            },
+          },
+        });
+        return;
+      }
+      case "turn/start": {
+        const threadId = getSentString(sent.params, "threadId") ?? "thread-unknown";
+        const turnId = threadId === "thread-1" ? "turn-1" : "turn-2";
+        this.queue.push({
+          id: request.id,
+          result: {
+            turn: {
+              id: turnId,
+              status: "inProgress",
+              items: [],
+              error: null,
+            },
+          },
+        });
+        this.queue.push({
+          method: "turn/started",
+          params: {
+            threadId,
+            turn: { id: turnId },
+          },
+        });
+        if (threadId === "thread-1") {
+          this.queue.push({
+            id: "approval-1",
+            method: "item/commandExecution/requestApproval",
+            params: {
+              threadId,
+              turnId,
+              itemId: "cmd-1",
+              command: "npm test",
+            },
+          });
+          return;
+        }
+        this.pushSuccessfulTurnEvents(threadId, turnId, "second response");
+        return;
+      }
+      case "turn/interrupt":
+        this.queue.push({ id: request.id, result: {} });
+        return;
+      default:
+        this.queue.push({
+          id: request.id,
+          error: { message: `Unexpected request: ${request.method}` },
+        });
+    }
+  }
+
+  close(): void {
+    this.queue.close();
+  }
+
+  private pushSuccessfulTurnEvents(threadId: string, turnId: string, finalResponse: string): void {
+    this.queue.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId,
+        turnId,
+        itemId: `msg-${turnId}`,
+        delta: finalResponse,
+      },
+    });
+    this.queue.push({
+      method: "item/completed",
+      params: {
+        threadId,
+        turnId,
+        item: {
+          id: `msg-${turnId}`,
+          type: "agentMessage",
+          text: finalResponse,
+        },
+      },
+    });
+    this.queue.push({
+      method: "turn/completed",
+      params: {
+        threadId,
+        turn: {
+          id: turnId,
+          status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+    });
+  }
+}
+
+const multiplyTool = tool(({ a, b }: { a: number; b: number }) => a * b, {
+  name: "multiply",
+  description: "Multiply two numbers.",
+  schema: z.object({
+    a: z.number(),
+    b: z.number(),
+  }),
+});
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(`Timed out after ${ms}ms.`)), ms);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  });
+}
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+} {
+  let resolve: (value: T) => void = () => undefined;
+  let reject: (error: Error) => void = () => undefined;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitUntil(predicate: () => boolean, ms = 5_000): Promise<void> {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > ms) {
+      throw new Error(`Timed out after ${ms}ms.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+function getSentString(value: unknown, key: string): string | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const property = (value as Record<string, unknown>)[key];
+  return typeof property === "string" ? property : undefined;
+}
+
+class MessageQueue<T> implements AsyncIterable<T> {
+  private readonly values: T[] = [];
+  private readonly waiters: Array<(result: IteratorResult<T>) => void> = [];
+  private closed = false;
+
+  push(value: T): void {
+    const waiter = this.waiters.shift();
+    if (waiter !== undefined) {
+      waiter({ value, done: false });
+      return;
+    }
+    this.values.push(value);
+  }
+
+  close(): void {
+    this.closed = true;
+    while (this.waiters.length > 0) {
+      this.waiters.shift()?.({ value: undefined as T, done: true });
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    return {
+      next: () => this.next(),
+    };
+  }
+
+  private next(): Promise<IteratorResult<T>> {
+    const value = this.values.shift();
+    if (value !== undefined) {
+      return Promise.resolve({ value, done: false });
+    }
+    if (this.closed) {
+      return Promise.resolve({ value: undefined as T, done: true });
+    }
+    return new Promise((resolve) => {
+      this.waiters.push(resolve);
+    });
+  }
+}

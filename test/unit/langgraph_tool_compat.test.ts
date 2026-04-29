@@ -213,6 +213,85 @@ describe("LangGraph tool compatibility", () => {
     expect(client.resumeThreadCalls[0]?.id).toBe("thread-langgraph");
     expect(client.thread.runInputs[1]).toBe("Human:\nContinue.");
   });
+
+  it("applies the same pending-message resume pattern for App Server runtime", async () => {
+    const client = new SequenceFakeCodexClient([
+      "First App Server response.",
+      "Second App Server response.",
+    ]);
+    const model = new ChatCodexSDK({
+      runtime: "app-server",
+      codexClient: asCodexClient(client),
+    });
+    const graph = new StateGraph(CodexThreadAnnotation)
+      .addNode("agent", async (state: typeof CodexThreadAnnotation.State) => {
+        const inputMessages =
+          state.codexThreadId === undefined
+            ? state.messages
+            : getPendingCodexMessages(state.messages);
+        const response = await model.invoke(
+          inputMessages,
+          state.codexThreadId === undefined ? undefined : { threadId: state.codexThreadId },
+        );
+
+        return {
+          messages: [response],
+          codexThreadId: getCodexThreadId(response) ?? state.codexThreadId,
+        };
+      })
+      .addEdge(START, "agent")
+      .addEdge("agent", END)
+      .compile({ checkpointer: new MemorySaver() });
+    const config = {
+      configurable: {
+        thread_id: "langgraph-app-server-checkpoint",
+      },
+    };
+
+    await graph.invoke({ messages: [new HumanMessage("Inspect with App Server.")] }, config);
+    const second = await graph.invoke(
+      { messages: [new HumanMessage("Continue with App Server.")] },
+      config,
+    );
+
+    expect(model._llmType()).toBe("codex-app-server");
+    expect(model._identifyingParams()).toMatchObject({ runtime: "app-server" });
+    expect(second.codexThreadId).toBe("thread-langgraph");
+    expect(client.startThreadOptions).toHaveLength(1);
+    expect(client.resumeThreadCalls).toHaveLength(1);
+    expect(client.resumeThreadCalls[0]?.id).toBe("thread-langgraph");
+    expect(client.thread.runInputs[1]).toBe("Human:\nContinue with App Server.");
+  });
+
+  it("keeps App Server calls stateless unless a Codex thread id is passed", async () => {
+    const client = new SequenceFakeCodexClient(["First response.", "Second response."]);
+    const model = new ChatCodexSDK({
+      runtime: "app-server",
+      codexClient: asCodexClient(client),
+    });
+
+    await model.invoke("First call.");
+    await model.invoke("Second call.");
+
+    expect(client.startThreadOptions).toHaveLength(2);
+    expect(client.resumeThreadCalls).toHaveLength(0);
+  });
+
+  it("uses constructor-level Codex thread ids explicitly for App Server runtime", async () => {
+    const client = new SequenceFakeCodexClient(["Pinned response."]);
+    const model = new ChatCodexSDK({
+      runtime: "app-server",
+      threadId: "thread-pinned",
+      codexClient: asCodexClient(client),
+    });
+
+    await model.invoke("Continue pinned thread.");
+
+    expect(client.startThreadOptions).toHaveLength(0);
+    expect(client.resumeThreadCalls).toHaveLength(1);
+    expect(client.resumeThreadCalls[0]?.id).toBe("thread-pinned");
+    expect(client.thread.runInputs[0]).toBe("Human:\nContinue pinned thread.");
+  });
 });
 
 const CodexThreadAnnotation = Annotation.Root({
@@ -264,7 +343,7 @@ function finalResponse(content: string): string {
   });
 }
 
-function asCodexClient(client: SequenceFakeCodexClient): CodexClientLike {
+function asCodexClient(client: CodexClientLike): CodexClientLike {
   return client;
 }
 

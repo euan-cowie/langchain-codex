@@ -1,6 +1,5 @@
 import type {
   ApprovalMode,
-  Codex,
   CodexOptions,
   Input,
   ModelReasoningEffort,
@@ -19,6 +18,26 @@ import type { ToolCallValidationMode } from "./tool_calling.js";
 
 export type CodexUsage = Usage;
 
+export type ChatCodexSDKRuntime = "sdk" | "app-server";
+
+export type CodexAppServerApprovalDecision =
+  | "accept"
+  | "acceptForSession"
+  | "decline"
+  | "cancel";
+
+export type CodexAppServerDefaultApprovalDecision = "decline" | "cancel" | "throw";
+
+export type CodexAppServerApprovalRequest = {
+  kind: "command" | "file_change";
+  method: string;
+  params: unknown;
+};
+
+export type CodexAppServerApprovalHandler = (
+  request: CodexAppServerApprovalRequest,
+) => Promise<CodexAppServerApprovalDecision> | CodexAppServerApprovalDecision;
+
 export type ChatCodexSDKResponseMetadata = Record<string, unknown> & {
   codex: {
     threadId?: string | null;
@@ -30,6 +49,7 @@ export type ChatCodexSDKResponseMetadata = Record<string, unknown> & {
 };
 
 export type ChatCodexSDKFields = BaseChatModelParams & {
+  runtime?: ChatCodexSDKRuntime;
   model?: string;
   workingDirectory?: string;
   skipGitRepoCheck?: boolean;
@@ -48,6 +68,8 @@ export type ChatCodexSDKFields = BaseChatModelParams & {
   apiKey?: string;
   codexPathOverride?: string;
   codexConfig?: CodexOptions["config"];
+  appServerApprovalHandler?: CodexAppServerApprovalHandler;
+  appServerDefaultApprovalDecision?: CodexAppServerDefaultApprovalDecision;
 
   timeoutMs?: number;
   toolCallValidation?: ToolCallValidationMode;
@@ -69,9 +91,12 @@ export type ChatCodexSDKCallOptions = BaseChatModelCallOptions & {
   codexToolCalling?: CodexToolCallingConfig;
 };
 
-export type CodexClientLike = Pick<Codex, "startThread" | "resumeThread">;
-
 export type CodexThreadLike = Pick<Thread, "id" | "run" | "runStreamed">;
+
+export type CodexClientLike = {
+  startThread(options?: ThreadOptions): CodexThreadLike;
+  resumeThread(id: string, options?: ThreadOptions): CodexThreadLike;
+};
 
 export type CodexInput = Input;
 

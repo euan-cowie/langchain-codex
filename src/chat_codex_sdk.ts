@@ -28,9 +28,11 @@ import {
 import type {
   ChatCodexSDKCallOptions,
   ChatCodexSDKFields,
+  ChatCodexSDKRuntime,
   CodexClientLike,
   CodexThreadLike,
 } from "./types.js";
+import { AppServerCodexClient } from "./app_server_runtime.js";
 import {
   createCodexToolCallingConfig,
   createToolCallingOutputSchema,
@@ -52,6 +54,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
   model: string | undefined;
 
   private readonly codexClient: CodexClientLike;
+  private readonly runtime: ChatCodexSDKRuntime;
   private readonly clientOptions: ConstructorParameters<typeof Codex>[0];
   private readonly threadOptions: ThreadOptions;
   private readonly defaultThreadId: string | undefined;
@@ -68,6 +71,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
     super(baseFields);
 
     this.model = fields.model;
+    this.runtime = normalizeRuntime(fields.runtime);
     this.defaultThreadId = fields.threadId;
     this.defaultTimeoutMs = fields.timeoutMs;
     this.defaultToolCallValidation = normalizeToolCallValidation(fields.toolCallValidation);
@@ -77,7 +81,20 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
 
     this.clientOptions = buildClientOptions(fields);
     this.threadOptions = buildThreadOptions(fields);
-    this.codexClient = fields.codexClient ?? new Codex(this.clientOptions);
+    const appServerOptions = {
+      ...this.clientOptions,
+      ...(fields.appServerApprovalHandler === undefined
+        ? {}
+        : { approvalHandler: fields.appServerApprovalHandler }),
+      ...(fields.appServerDefaultApprovalDecision === undefined
+        ? {}
+        : { defaultApprovalDecision: fields.appServerDefaultApprovalDecision }),
+    };
+    this.codexClient =
+      fields.codexClient ??
+      (this.runtime === "app-server"
+        ? new AppServerCodexClient(appServerOptions)
+        : new Codex(this.clientOptions));
   }
 
   override get callKeys(): string[] {
@@ -94,7 +111,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
   }
 
   override _llmType(): string {
-    return "codex-sdk";
+    return this.runtime === "app-server" ? "codex-app-server" : "codex-sdk";
   }
 
   /**
@@ -121,6 +138,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
   override invocationParams(options?: this["ParsedCallOptions"]): Record<string, unknown> {
     return {
       model: this.model,
+      runtime: this.runtime,
       workingDirectory: this.threadOptions.workingDirectory,
       sandboxMode: this.threadOptions.sandboxMode,
       approvalPolicy: this.threadOptions.approvalPolicy,
@@ -165,6 +183,7 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
   override _identifyingParams(): Record<string, unknown> {
     return {
       model: this.model,
+      runtime: this.runtime,
       workingDirectory: this.threadOptions.workingDirectory,
       sandboxMode: this.threadOptions.sandboxMode,
       approvalPolicy: this.threadOptions.approvalPolicy,
@@ -595,6 +614,11 @@ export class ChatCodexSDK extends BaseChatModel<ChatCodexSDKCallOptions, AIMessa
 
     return this.codexClient.startThread(this.threadOptions);
   }
+
+  async close(): Promise<void> {
+    const maybeClose = (this.codexClient as { close?: () => Promise<void> | void }).close;
+    await maybeClose?.call(this.codexClient);
+  }
 }
 
 function createToolCallingMessage(
@@ -983,6 +1007,18 @@ function buildClientOptions(fields: ChatCodexSDKFields): ConstructorParameters<t
   }
 
   return options;
+}
+
+function normalizeRuntime(value: ChatCodexSDKRuntime | undefined): ChatCodexSDKRuntime {
+  if (value === undefined) {
+    return "sdk";
+  }
+
+  if (value === "sdk" || value === "app-server") {
+    return value;
+  }
+
+  throw new CodexUnsupportedFeatureError('runtime must be either "sdk" or "app-server".');
 }
 
 function buildThreadOptions(fields: ChatCodexSDKFields): ThreadOptions {

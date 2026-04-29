@@ -47,6 +47,7 @@
     "test": "vitest run",
     "test:unit": "vitest run test/unit",
     "test:integration": "RUN_CODEX_INTEGRATION_TESTS=1 vitest run test/integration",
+    "test:integration:app-server": "CODEX_APP_SERVER_INTEGRATION=1 vitest run test/integration/app_server_runtime.integration.test.ts",
     "typecheck": "tsc --noEmit",
     "changeset": "changeset",
     "changeset:check": "node scripts/check-changeset.mjs",
@@ -65,6 +66,7 @@
   },
   "dependencies": {
     "ajv": "^6.15.0",
+    "@openai/codex": "^0.125.0",
     "@openai/codex-sdk": "^0.125.0"
   },
   "devDependencies": {

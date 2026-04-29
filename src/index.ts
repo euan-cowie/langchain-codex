@@ -3,8 +3,15 @@ export type {
   ChatCodexSDKCallOptions,
   ChatCodexSDKFields,
   ChatCodexSDKResponseMetadata,
+  ChatCodexSDKRuntime,
+  CodexAppServerApprovalDecision,
+  CodexAppServerDefaultApprovalDecision,
+  CodexAppServerApprovalHandler,
+  CodexAppServerApprovalRequest,
   CodexUsage,
 } from "./types.js";
+export { AppServerCodexClient } from "./app_server_runtime.js";
+export type { AppServerCodexClientOptions, AppServerTransport } from "./app_server_runtime.js";
 export {
   CodexAdapterError,
   CodexAuthError,
